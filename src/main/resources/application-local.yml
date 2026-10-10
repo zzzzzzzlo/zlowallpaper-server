@@ -1,0 +1,26 @@
+# 本机开发专用。通过扩展名提示显式将根目录 .env 作为 properties 读取。
+spring:
+  config:
+    import: "optional:file:./.env[.properties]"
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/zlowallpaper?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&characterEncoding=UTF-8&allowPublicKeyRetrieval=true&sslMode=DISABLED
+    username: wallpaper_app
+    password: ${MYSQL_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 1
+      connection-timeout: 5000
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      timeout: 2s
+      repositories:
+        enabled: false
+
+wallpaper:
+  test-payment:
+    enabled: true
+  storage:
+    root: "${WALLPAPER_STORAGE_ROOT:D:/Codex/software/zlowallpaper-storage}"

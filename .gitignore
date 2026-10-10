@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+target/
+out/
+.idea/
+*.iml
+*.log
+.local-setup/

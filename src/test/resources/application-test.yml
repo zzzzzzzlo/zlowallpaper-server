@@ -1,0 +1,11 @@
+# 自动测试使用独立内存数据库，不读取真实密码、不连接商城库。
+spring:
+  datasource:
+    url: jdbc:h2:mem:skeleton;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  data:
+    redis:
+      repositories:
+        enabled: false
