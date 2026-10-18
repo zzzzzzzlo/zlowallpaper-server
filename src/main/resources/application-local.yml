@@ -20,7 +20,5 @@ spring:
         enabled: false
 
 wallpaper:
-  test-payment:
-    enabled: true
   storage:
     root: "${WALLPAPER_STORAGE_ROOT:D:/Codex/software/zlowallpaper-storage}"

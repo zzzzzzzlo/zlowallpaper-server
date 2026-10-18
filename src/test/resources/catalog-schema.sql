@@ -1,0 +1,41 @@
+-- 独立H2查询测试；商品直接存储两份文件元数据，没有资产表。
+CREATE TABLE IF NOT EXISTS categories (
+    id BIGINT PRIMARY KEY, name VARCHAR(64) NOT NULL,
+    sort_order INT NOT NULL, enabled TINYINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wallpapers (
+    id BIGINT PRIMARY KEY, title VARCHAR(120) NOT NULL, description VARCHAR(4000) NOT NULL DEFAULT '',
+    category_id BIGINT NOT NULL REFERENCES categories(id), type VARCHAR(16) NOT NULL,
+    price_cents INT NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'ZLC', creator VARCHAR(120) NOT NULL DEFAULT '',
+    publication_status VARCHAR(16) NOT NULL DEFAULT 'DRAFT', published_at TIMESTAMP(3),
+    original_filename VARCHAR(255),
+    original_storage_provider VARCHAR(32),
+    original_bucket VARCHAR(128),
+    original_object_key VARCHAR(512),
+    original_object_version_id VARCHAR(128),
+    original_mime_type VARCHAR(127),
+    original_file_extension VARCHAR(16),
+    original_size_bytes BIGINT,
+    original_sha256 CHAR(64),
+    original_width INT,
+    original_height INT,
+    original_fps DECIMAL(10,3),
+    original_status VARCHAR(16),
+    original_uploaded_by BIGINT,
+    original_uploaded_at TIMESTAMP(3),
+    cover_filename VARCHAR(255),
+    cover_storage_provider VARCHAR(32),
+    cover_bucket VARCHAR(128),
+    cover_object_key VARCHAR(512),
+    cover_object_version_id VARCHAR(128),
+    cover_mime_type VARCHAR(127),
+    cover_file_extension VARCHAR(16),
+    cover_size_bytes BIGINT,
+    cover_sha256 CHAR(64),
+    cover_width INT,
+    cover_height INT,
+    cover_fps DECIMAL(10,3),
+    cover_status VARCHAR(16),
+    cover_uploaded_by BIGINT,
+    cover_uploaded_at TIMESTAMP(3)
+);

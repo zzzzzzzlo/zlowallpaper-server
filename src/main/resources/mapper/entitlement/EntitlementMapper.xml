@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.entitlement.mapper.EntitlementMapper">
+    <select id="selectForUpdate" resultType="com.zlo.wallpaper.entitlement.entity.Entitlement">
+        SELECT id, user_id, wallpaper_id, source_order_id, granted_at, created_at, updated_at
+        FROM entitlements WHERE user_id = #{userId} AND wallpaper_id = #{wallpaperId} FOR UPDATE
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO entitlements (user_id, wallpaper_id, source_order_id, granted_at, created_at, updated_at)
+        VALUES (#{userId}, #{wallpaperId}, #{sourceOrderId}, #{grantedAt}, #{createdAt}, #{updatedAt})
+    </insert>
+    <!-- 退款删除仅限该订单授予的权益，旧退款通知不能删除重新购买产生的新权益。 -->
+    <delete id="deleteBySourceOrder">
+        DELETE FROM entitlements
+        WHERE user_id = #{userId} AND wallpaper_id = #{wallpaperId} AND source_order_id = #{orderId}
+    </delete>
+</mapper>

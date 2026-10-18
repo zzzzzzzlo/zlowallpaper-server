@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.order.mapper.OrderMapper">
+    <sql id="orderColumns">
+        id, user_id, wallpaper_id, title_snapshot, amount_cents, currency, status,
+        payment_method, created_at, paid_at, canceled_at, refunded_at, updated_at
+    </sql>
+    <!-- 不关联当前商品：改名、调价和下架都不影响历史订单快照；user_id保护账号隔离。 -->
+    <select id="selectOrdersByUserId" resultType="com.zlo.wallpaper.order.entity.Order">
+        SELECT <include refid="orderColumns"/>
+        FROM orders
+        WHERE user_id = #{userId}
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+    <!-- 锁一条购买者记录，使同一账号的并发下单按顺序判断；不锁整张用户表。 -->
+    <select id="selectBuyerStatusForUpdate" resultType="java.lang.String">
+        SELECT status FROM users WHERE id = #{userId} FOR UPDATE
+    </select>
+    <!-- 锁住商品后读取价格快照，避免管理员调价/下架与本次新下单交错。 -->
+    <select id="selectProductForUpdate" resultType="com.zlo.wallpaper.order.model.OrderProductRow">
+        SELECT id, title, price_cents, currency, publication_status
+        FROM wallpapers WHERE id = #{wallpaperId} FOR UPDATE
+    </select>
+    <select id="selectActiveOrderForUpdate" resultType="com.zlo.wallpaper.order.entity.Order">
+        SELECT <include refid="orderColumns"/>
+        FROM orders WHERE user_id = #{userId} AND active_wallpaper_id = #{wallpaperId}
+        FOR UPDATE
+    </select>
+    <select id="selectOwnedOrderForUpdate" resultType="com.zlo.wallpaper.order.entity.Order">
+        SELECT <include refid="orderColumns"/>
+        FROM orders WHERE id = #{orderId} AND user_id = #{userId} FOR UPDATE
+    </select>
+    <insert id="insertOrder" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO orders (user_id, wallpaper_id, title_snapshot, amount_cents, currency, status,
+                            payment_method, created_at, paid_at, updated_at)
+        VALUES (#{userId}, #{wallpaperId}, #{titleSnapshot}, #{amountCents}, #{currency}, #{status},
+                #{paymentMethod}, #{createdAt}, #{paidAt}, #{updatedAt})
+    </insert>
+    <!-- 用户行和订单行已由Service依次锁定；只改变付款字段，不读取商品当前价格。 -->
+    <update id="updatePaidStatus">
+        UPDATE orders
+        SET status = 'PAID', payment_method = 'COIN', paid_at = #{paidAt}, updated_at = #{updatedAt}
+        WHERE id = #{id} AND user_id = #{userId} AND status = 'PENDING'
+    </update>
+</mapper>

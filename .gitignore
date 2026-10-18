@@ -7,3 +7,5 @@ out/
 *.iml
 *.log
 .local-setup/
+.playwright-cli/
+output/playwright/

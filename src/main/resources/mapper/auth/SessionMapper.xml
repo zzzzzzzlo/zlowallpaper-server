@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.auth.mapper.SessionMapper">
+    <sql id="columns">id, user_id, family_id, refresh_token_hash, created_at, expires_at,
+        revoked_at, revoke_reason, replaced_by_id</sql>
+    <select id="selectById" resultType="com.zlo.wallpaper.auth.entity.Session">
+        SELECT <include refid="columns"/> FROM sessions WHERE id = #{id}
+    </select>
+    <select id="selectByRefreshHash" resultType="com.zlo.wallpaper.auth.entity.Session">
+        SELECT <include refid="columns"/> FROM sessions WHERE refresh_token_hash = #{hash}
+    </select>
+    <select id="selectByRefreshHashForUpdate" resultType="com.zlo.wallpaper.auth.entity.Session">
+        SELECT <include refid="columns"/> FROM sessions WHERE refresh_token_hash = #{hash} FOR UPDATE
+    </select>
+    <!-- 锁住整组最早的记录：刷新和登出必须按同一把锁串行处理。 -->
+    <select id="lockFamily" resultType="com.zlo.wallpaper.auth.entity.Session">
+        SELECT <include refid="columns"/> FROM sessions
+        WHERE family_id = #{familyId} ORDER BY id LIMIT 1 FOR UPDATE
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO sessions (user_id, family_id, refresh_token_hash, created_at, expires_at)
+        VALUES (#{userId}, #{familyId}, #{refreshTokenHash}, #{createdAt}, #{expiresAt})
+    </insert>
+    <update id="markRotated">
+        UPDATE sessions SET revoked_at = #{now}, revoke_reason = 'ROTATED', replaced_by_id = #{nextId}
+        WHERE id = #{id} AND revoked_at IS NULL
+    </update>
+    <update id="revokeFamily">
+        UPDATE sessions SET revoked_at = #{now}, revoke_reason = #{reason}
+        WHERE family_id = #{familyId}
+    </update>
+    <!-- 一组记录使用同一固定 expires_at，因此会一起达到清理条件。 -->
+    <delete id="deleteExpired">DELETE FROM sessions WHERE expires_at &lt; #{cutoff}</delete>
+</mapper>

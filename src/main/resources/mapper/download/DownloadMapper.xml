@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.download.mapper.DownloadMapper">
+    <!-- e限制本账号权益；w只读取当前原文件，停售不剥夺已购下载权，不查询历史资产。 -->
+    <select id="selectOwnedDownloadFile" resultType="com.zlo.wallpaper.download.model.DownloadFileRow">
+        SELECT w.original_storage_provider AS storageProvider, w.original_bucket AS bucket,
+               w.original_object_key AS objectKey, w.original_object_version_id AS objectVersionId,
+               w.original_file_extension AS fileExtension, w.original_size_bytes AS sizeBytes,
+               w.original_sha256 AS sha256, w.original_status AS status
+        FROM entitlements e
+        JOIN wallpapers w ON w.id = e.wallpaper_id
+        WHERE e.user_id = #{userId} AND e.wallpaper_id = #{wallpaperId}
+    </select>
+</mapper>

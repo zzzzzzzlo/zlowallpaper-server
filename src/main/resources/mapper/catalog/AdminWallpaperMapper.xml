@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.catalog.mapper.AdminWallpaperMapper">
+    <resultMap id="wallpaper" type="com.zlo.wallpaper.catalog.entity.Wallpaper">
+        <id column="id" property="id"/>
+        <result column="title" property="title"/>
+        <result column="description" property="description"/>
+        <result column="category_id" property="categoryId"/>
+        <result column="type" property="type"/>
+        <result column="price_cents" property="priceCents"/>
+        <result column="currency" property="currency"/>
+        <result column="creator" property="creator"/>
+        <result column="publication_status" property="publicationStatus"/>
+        <result column="published_at" property="publishedAt"/>
+        <result column="created_by" property="createdBy"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="category_name" property="categoryName"/>
+        <association property="original" javaType="com.zlo.wallpaper.catalog.model.UploadedFile" notNullColumn="original_object_key">
+            <result column="original_filename" property="originalFilename"/>
+            <result column="original_storage_provider" property="storageProvider"/>
+            <result column="original_bucket" property="bucket"/>
+            <result column="original_object_key" property="objectKey"/>
+            <result column="original_object_version_id" property="objectVersionId"/>
+            <result column="original_mime_type" property="mimeType"/>
+            <result column="original_file_extension" property="fileExtension"/>
+            <result column="original_size_bytes" property="sizeBytes"/>
+            <result column="original_sha256" property="sha256"/>
+            <result column="original_width" property="width"/>
+            <result column="original_height" property="height"/>
+            <result column="original_fps" property="fps"/>
+            <result column="original_status" property="status"/>
+            <result column="original_uploaded_by" property="uploadedBy"/>
+            <result column="original_uploaded_at" property="createdAt"/>
+        </association>
+        <association property="cover" javaType="com.zlo.wallpaper.catalog.model.UploadedFile" notNullColumn="cover_object_key">
+            <result column="cover_filename" property="originalFilename"/>
+            <result column="cover_storage_provider" property="storageProvider"/>
+            <result column="cover_bucket" property="bucket"/>
+            <result column="cover_object_key" property="objectKey"/>
+            <result column="cover_object_version_id" property="objectVersionId"/>
+            <result column="cover_mime_type" property="mimeType"/>
+            <result column="cover_file_extension" property="fileExtension"/>
+            <result column="cover_size_bytes" property="sizeBytes"/>
+            <result column="cover_sha256" property="sha256"/>
+            <result column="cover_width" property="width"/>
+            <result column="cover_height" property="height"/>
+            <result column="cover_fps" property="fps"/>
+            <result column="cover_status" property="status"/>
+            <result column="cover_uploaded_by" property="uploadedBy"/>
+            <result column="cover_uploaded_at" property="createdAt"/>
+        </association>
+    </resultMap>
+    <sql id="columns">
+        w.id, w.title, w.description, w.category_id, w.type,
+        w.price_cents, w.currency, w.creator, w.publication_status, w.published_at,
+        w.created_by, w.created_at, w.updated_at, w.original_filename, w.original_storage_provider,
+        w.original_bucket, w.original_object_key, w.original_object_version_id, w.original_mime_type, w.original_file_extension,
+        w.original_size_bytes, w.original_sha256, w.original_width, w.original_height, w.original_fps,
+        w.original_status, w.original_uploaded_by, w.original_uploaded_at, w.cover_filename, w.cover_storage_provider,
+        w.cover_bucket, w.cover_object_key, w.cover_object_version_id, w.cover_mime_type, w.cover_file_extension,
+        w.cover_size_bytes, w.cover_sha256, w.cover_width, w.cover_height, w.cover_fps,
+        w.cover_status, w.cover_uploaded_by, w.cover_uploaded_at
+    </sql>
+    <!-- 分类名称用于管理端展示；只关联一行分类，不过滤商品发布状态。 -->
+    <select id="selectPage" resultMap="wallpaper">
+        SELECT <include refid="columns"/>, c.name AS category_name
+        FROM wallpapers w JOIN categories c ON c.id = w.category_id
+        ORDER BY w.created_at DESC, w.id DESC
+    </select>
+    <select id="selectById" resultMap="wallpaper">
+        SELECT <include refid="columns"/>, c.name AS category_name
+        FROM wallpapers w JOIN categories c ON c.id = w.category_id
+        WHERE w.id = #{id}
+    </select>
+    <!-- 锁商品本身，避免把分类联表一起锁住；分类校验单独完成。 -->
+    <select id="selectByIdForUpdate" resultMap="wallpaper">
+        SELECT <include refid="columns"/> FROM wallpapers w WHERE w.id = #{id} FOR UPDATE
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO wallpapers (
+            title, description, category_id, type, price_cents,
+            currency, creator, publication_status, published_at, created_by,
+            created_at, updated_at, original_filename, original_storage_provider, original_bucket,
+            original_object_key, original_object_version_id, original_mime_type, original_file_extension, original_size_bytes,
+            original_sha256, original_width, original_height, original_fps, original_status,
+            original_uploaded_by, original_uploaded_at, cover_filename, cover_storage_provider, cover_bucket,
+            cover_object_key, cover_object_version_id, cover_mime_type, cover_file_extension, cover_size_bytes,
+            cover_sha256, cover_width, cover_height, cover_fps, cover_status,
+            cover_uploaded_by, cover_uploaded_at
+        ) VALUES (
+            #{title}, #{description}, #{categoryId}, #{type}, #{priceCents},
+            #{currency}, #{creator}, #{publicationStatus}, #{publishedAt}, #{createdBy},
+            #{createdAt}, #{updatedAt}, #{original.originalFilename}, #{original.storageProvider}, #{original.bucket},
+            #{original.objectKey}, #{original.objectVersionId}, #{original.mimeType}, #{original.fileExtension}, #{original.sizeBytes},
+            #{original.sha256}, #{original.width}, #{original.height}, #{original.fps}, #{original.status},
+            #{original.uploadedBy}, #{original.createdAt}, #{cover.originalFilename}, #{cover.storageProvider}, #{cover.bucket},
+            #{cover.objectKey}, #{cover.objectVersionId}, #{cover.mimeType}, #{cover.fileExtension}, #{cover.sizeBytes},
+            #{cover.sha256}, #{cover.width}, #{cover.height}, #{cover.fps}, #{cover.status},
+            #{cover.uploadedBy}, #{cover.createdAt}
+        )
+    </insert>
+    <update id="update">
+        UPDATE wallpapers
+        <set>
+            title = #{wallpaper.title},
+            description = #{wallpaper.description},
+            category_id = #{wallpaper.categoryId},
+            type = #{wallpaper.type},
+            price_cents = #{wallpaper.priceCents},
+            creator = #{wallpaper.creator},
+            updated_at = #{wallpaper.updatedAt},
+            <if test="replaceOriginal">
+                original_filename = #{wallpaper.original.originalFilename},
+                original_storage_provider = #{wallpaper.original.storageProvider},
+                original_bucket = #{wallpaper.original.bucket},
+                original_object_key = #{wallpaper.original.objectKey},
+                original_object_version_id = #{wallpaper.original.objectVersionId},
+                original_mime_type = #{wallpaper.original.mimeType},
+                original_file_extension = #{wallpaper.original.fileExtension},
+                original_size_bytes = #{wallpaper.original.sizeBytes},
+                original_sha256 = #{wallpaper.original.sha256},
+                original_width = #{wallpaper.original.width},
+                original_height = #{wallpaper.original.height},
+                original_fps = #{wallpaper.original.fps},
+                original_status = #{wallpaper.original.status},
+                original_uploaded_by = #{wallpaper.original.uploadedBy},
+                original_uploaded_at = #{wallpaper.original.createdAt},
+            </if>
+            <if test="replaceCover">
+                cover_filename = #{wallpaper.cover.originalFilename},
+                cover_storage_provider = #{wallpaper.cover.storageProvider},
+                cover_bucket = #{wallpaper.cover.bucket},
+                cover_object_key = #{wallpaper.cover.objectKey},
+                cover_object_version_id = #{wallpaper.cover.objectVersionId},
+                cover_mime_type = #{wallpaper.cover.mimeType},
+                cover_file_extension = #{wallpaper.cover.fileExtension},
+                cover_size_bytes = #{wallpaper.cover.sizeBytes},
+                cover_sha256 = #{wallpaper.cover.sha256},
+                cover_width = #{wallpaper.cover.width},
+                cover_height = #{wallpaper.cover.height},
+                cover_fps = #{wallpaper.cover.fps},
+                cover_status = #{wallpaper.cover.status},
+                cover_uploaded_by = #{wallpaper.cover.uploadedBy},
+                cover_uploaded_at = #{wallpaper.cover.createdAt},
+            </if>
+        </set>
+        WHERE id = #{wallpaper.id}
+    </update>
+    <update id="updatePublication">
+        UPDATE wallpapers SET publication_status = #{status}, published_at = #{publishedAt}, updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+    <select id="countFileReferences" resultType="long">
+        SELECT COUNT(*) FROM wallpapers
+        WHERE (original_storage_provider IN ('OSS','COS') AND original_bucket = #{bucket} AND original_object_key = #{objectKey})
+           OR (cover_storage_provider IN ('OSS','COS') AND cover_bucket = #{bucket} AND cover_object_key = #{objectKey})
+    </select>
+</mapper>

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.catalog.mapper.WallpaperMapper">
+    <sql id="publicColumns">
+        w.id, w.title, w.description, w.category_id AS categoryId,
+        c.name AS categoryName, w.type, w.price_cents AS priceCents, w.currency,
+        w.original_width AS width, w.original_height AS height, w.original_fps AS fps,
+        w.original_sha256 AS sha256, w.original_size_bytes AS sizeBytes, w.creator
+    </sql>
+    <!-- e只匹配当前账号有效权益；关联w取当前商品/文件、关联c取分类名称，不按上架或分类启停过滤。 -->
+    <select id="selectOwnedWallpapers" resultType="com.zlo.wallpaper.catalog.model.WallpaperRow">
+        SELECT <include refid="publicColumns"/>
+        FROM entitlements e
+        JOIN wallpapers w ON w.id = e.wallpaper_id
+        JOIN categories c ON c.id = w.category_id
+        WHERE e.user_id = #{userId}
+        <if test="keyword != null and keyword != ''">
+            AND w.title LIKE CONCAT('%', #{keyword}, '%') ESCAPE '!'
+        </if>
+        <if test="categoryId != null">AND w.category_id = #{categoryId}</if>
+        <if test="wallpaperId != null">AND w.id = #{wallpaperId}</if>
+        ORDER BY e.granted_at DESC, e.id DESC
+    </select>
+    <!-- 不提供任意未上架商品读取能力：未购或其他账号均无记录。 -->
+    <select id="selectOwnedCover" resultType="com.zlo.wallpaper.catalog.model.CoverRow">
+        SELECT w.id, w.cover_storage_provider AS storageProvider, w.cover_bucket AS bucket,
+               w.cover_object_key AS objectKey, w.cover_mime_type AS mimeType, w.cover_size_bytes AS sizeBytes
+        FROM entitlements e
+        JOIN wallpapers w ON w.id = e.wallpaper_id
+        WHERE e.user_id = #{userId} AND w.id = #{id}
+          AND w.cover_status = 'READY' AND w.cover_object_key IS NOT NULL
+    </select>
+    <sql id="publicTables">
+        FROM wallpapers w
+        JOIN categories c ON c.id = w.category_id
+        WHERE w.publication_status = 'PUBLISHED'
+          AND w.cover_status = 'READY' AND w.cover_object_key IS NOT NULL
+          AND w.original_status = 'READY' AND w.original_object_key IS NOT NULL
+        <!-- 不按 c.enabled 过滤：分类停用不能自动下架已有商品。 -->
+    </sql>
+    <select id="selectPublishedPage" resultType="com.zlo.wallpaper.catalog.model.WallpaperRow">
+        SELECT <include refid="publicColumns"/>
+        <include refid="publicTables"/>
+        <if test="keyword != null and keyword != ''">
+            AND w.title LIKE CONCAT('%', #{keyword}, '%') ESCAPE '!'
+        </if>
+        <if test="categoryId != null">AND w.category_id = #{categoryId}</if>
+        ORDER BY w.published_at DESC, w.id DESC
+    </select>
+    <select id="selectPublishedById" resultType="com.zlo.wallpaper.catalog.model.WallpaperRow">
+        SELECT <include refid="publicColumns"/>
+        <include refid="publicTables"/>
+          AND w.id = #{id}
+    </select>
+    <select id="selectPublicCover" resultType="com.zlo.wallpaper.catalog.model.CoverRow">
+        SELECT w.id, w.cover_storage_provider AS storageProvider, w.cover_bucket AS bucket,
+               w.cover_object_key AS objectKey, w.cover_mime_type AS mimeType, w.cover_size_bytes AS sizeBytes
+        FROM wallpapers w
+        WHERE w.id = #{id} AND w.publication_status = 'PUBLISHED'
+          AND w.cover_status = 'READY' AND w.cover_object_key IS NOT NULL
+    </select>
+    <select id="selectAdminCover" resultType="com.zlo.wallpaper.catalog.model.CoverRow">
+        SELECT w.id, w.cover_storage_provider AS storageProvider, w.cover_bucket AS bucket,
+               w.cover_object_key AS objectKey, w.cover_mime_type AS mimeType, w.cover_size_bytes AS sizeBytes
+        FROM wallpapers w
+        WHERE w.id = #{id} AND w.cover_status = 'READY' AND w.cover_object_key IS NOT NULL
+    </select>
+</mapper>

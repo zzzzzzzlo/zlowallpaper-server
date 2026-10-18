@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.zlo.wallpaper.catalog.mapper.CategoryMapper">
+    <sql id="categoryColumns">c.id, c.name, c.sort_order, c.enabled, c.created_at, c.updated_at</sql>
+    <sql id="adminCategoryQuery">
+        SELECT <include refid="categoryColumns"/>, COUNT(w.id) AS wallpaper_count
+        FROM categories c
+        LEFT JOIN wallpapers w ON w.category_id = c.id
+    </sql>
+    <sql id="categoryGroup">
+        GROUP BY c.id, c.name, c.sort_order, c.enabled, c.created_at, c.updated_at
+    </sql>
+    <select id="selectAdminCategories" resultType="com.zlo.wallpaper.catalog.model.AdminCategoryRow">
+        <include refid="adminCategoryQuery"/>
+        <include refid="categoryGroup"/>
+        ORDER BY c.sort_order ASC, c.id ASC
+    </select>
+    <select id="selectAdminById" resultType="com.zlo.wallpaper.catalog.model.AdminCategoryRow">
+        <include refid="adminCategoryQuery"/>
+        WHERE c.id = #{id}
+        <include refid="categoryGroup"/>
+    </select>
+    <select id="selectById" resultType="com.zlo.wallpaper.catalog.entity.Category">
+        SELECT id, name, sort_order, enabled, created_at, updated_at FROM categories WHERE id = #{id}
+    </select>
+    <select id="selectByIdForUpdate" resultType="com.zlo.wallpaper.catalog.entity.Category">
+        SELECT id, name, sort_order, enabled, created_at, updated_at
+        FROM categories WHERE id = #{id} FOR UPDATE
+    </select>
+    <select id="selectByName" resultType="com.zlo.wallpaper.catalog.entity.Category">
+        SELECT id, name, sort_order, enabled, created_at, updated_at
+        FROM categories WHERE name = #{name}
+        <if test="excludeId != null">AND id != #{excludeId}</if>
+    </select>
+    <select id="countWallpapers" resultType="long">
+        SELECT COUNT(*) FROM wallpapers WHERE category_id = #{categoryId}
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO categories (name, sort_order, enabled, created_at, updated_at)
+        VALUES (#{name}, #{sortOrder}, #{enabled}, #{createdAt}, #{updatedAt})
+    </insert>
+    <update id="update">
+        UPDATE categories
+        <set>
+            <if test="name != null">name = #{name},</if>
+            <if test="sortOrder != null">sort_order = #{sortOrder},</if>
+            <if test="enabled != null">enabled = #{enabled},</if>
+            updated_at = #{updatedAt}
+        </set>
+        WHERE id = #{id}
+    </update>
+    <delete id="deleteById">DELETE FROM categories WHERE id = #{id}</delete>
+</mapper>

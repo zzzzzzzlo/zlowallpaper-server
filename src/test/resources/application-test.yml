@@ -1,4 +1,9 @@
 # 自动测试使用独立内存数据库，不读取真实密码、不连接商城库。
+wallpaper:
+  auth:
+    # 仅用于测试的固定密钥。
+    jwt-secret: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    cleanup-cron: "-"
 spring:
   datasource:
     url: jdbc:h2:mem:skeleton;DB_CLOSE_DELAY=-1
