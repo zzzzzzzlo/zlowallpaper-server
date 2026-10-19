@@ -6,6 +6,8 @@
 
 已购分页更新：`GET /me/wallpapers` 现在返回 `data={items,page,pageSize,total}`，默认每页 12 条、最多 50 条；取消原 200 项总量上限。支持标题、分类和商品精确筛选，Qt 翻页和跨页权益识别已同步。订单列表仍是最多 1000 项的数组，这两个接口不要混淆。
 
+封面缓存更新：三个封面入口在各自的数据库可见性/权益检查之后，共享 Redis 中的图片字节；未命中再读 COS/OSS，写入起 6 小时过期。替换文件使用新对象键，Redis 不可用则回源。`WallpaperServiceImpl` 两个分页入口统一为“整理参数 → 分页查询 → 循环转换”，只保留一个 `toVO(row,coverUrl)`。配置和实测见 [封面缓存说明](cover-cache-development.md)。
+
 阅读方式：先看公共类，再通过下面的接口索引跳转。本文使用纯 Markdown 标题、代码块和标题链接；Obsidian 可在阅读视图或实时预览中查看。尖括号类型统一放在代码标记内，避免被当作 HTML。
 
 本文覆盖 **25 个已经实现的后端 HTTP 接口**，统一前缀为 `/api/v1`，下文路径省略此前缀。先说明公共调用类，再按接口列出实际执行顺序、读写的数据和使用的技术。`A → B` 表示直接调用；链路中的分支和事务边界会单独写出。
@@ -82,10 +84,16 @@
 | [CosStorage][cos-storage] / [OssStorage][oss-storage] | 小文件直接上传、大文件顺序分片；读封面；签原文件临时地址；精确删除对象/存储版本 | ObjectStorage 调用；分别封装腾讯云 COS、阿里云 OSS 官方 SDK |
 | [WallpaperPersistenceService][wallpaper-persistence] | `create/update/publish` 在短数据库事务内写商品；重新核对权限、分类、商品文件快照 | AdminWallpaperServiceImpl 调用的另一 Spring Bean；长时间云文件上传发生在进入这些事务之前 |
 | [ProductFileCleanupService][file-cleanup] | `trackUpload` 登记待清理对象；`completeUpload` 结束跟踪；`rollbackUpload` 回收失败上传；`retireFile` 回收替换前文件 | 商品 Service 编排；先用 `AdminWallpaperMapper.countFileReferences` 查引用，确认无人引用才删除对应云对象。失败保留本地 JSON 任务重试 |
-| [CoverService][cover-service]：`read/readAdmin/readOwned → readFile` | 三种可见性分别查数据库后，共用封面读取；COS/OSS 读字节，本地旧数据走受根目录限制的文件路径 | 公开/已购 CoverController 和管理员商品 Controller；成功返回 Resource、媒体类型与大小 |
+| [CoverService][cover-service]：`read/readAdmin/readOwned → readFile` | 三种可见性分别查数据库后，共用封面读取；云文件先查 Redis，未命中再读 COS/OSS；本地旧数据检查规范化路径、目录范围、文件存在与大小 | 公开/已购 CoverController 和管理员商品 Controller；成功返回 Resource、媒体类型与大小 |
+| [CoverCacheService][cover-cache]：`getCover/putCover` | 只读写 Redis 图片字节；未命中或连接失败返回 null，写入与 TTL 一次完成；不查询权限 | 注入 CoverService，云文件分支调用；默认启用、TTL 21600 秒，异常仅记 debug 日志 |
+| [RedisConfig][redis-config]：`coverRedisTemplate` | 创建 `RedisTemplate<String,byte[]>`，键使用字符串、值直接使用原始字节序列化 | Spring 创建并注入 CoverCacheService；底层由 Boot 配置的 Lettuce 连接 Redis |
 | [AssetConfig][asset-config]、[CosProperties][cos-properties]、[OssProperties][oss-properties]、[UploadProperties][upload-properties] | 绑定 COS/OSS 和媒体工具配置 | 当前属于商品文件配置；AssetConfig 名称保留，不表示仍有 assets 表或独立资产模块 |
 
 上传使用 JVM 内的 `Semaphore(2)`，拿不到槽位立即返回 `429 UPLOAD_BUSY`；处理完在 finally 释放。它限制同一进程同时处理的**文件任务**，不是全系统最多两个商品请求，也不是 Redis 分布式锁。一次创建顺序处理封面、原文件。
+
+缓存键为 `cover:v1:{provider}:{bucket}:{objectKey}`。上传替换封面生成新 UUID 对象键，因此新请求不会命中旧文件缓存；旧键等待 TTL 到期或 Redis 淘汰。缓存只存图片字节，不缓存可见性、账号或权益：每次请求都先执行数据库查询，商品下架或权益记录删除后仍按当前权限拒绝。缓存命中检查字节长度，云文件读取仍检查实际大小。首版不合并同一图片的并发未命中请求，不使用分布式锁。
+
+本地旧文件只做基础防御：`normalize → startsWith(storageRoot) → isRegularFile → size`，保留 MIME 白名单和 4 MiB 上限；不再逐段检查符号链接及真实路径。本地根目录由后端管理，客户端不能指定任意文件路径。
 
 `CoverService.Cover` 是内嵌 record 类，用于一起返回 `Resource`、`MediaType` 和字节长度；它不是 HTTP JSON 响应。Controller 通过 `resource()/mediaType()/size()` 取值并返回图片字节。
 
@@ -115,6 +123,7 @@
 | Spring Transaction / spring-tx | 6.2.19 | `@Transactional`，下单、付款、分类写操作、会话轮换、商品短事务 |
 | 阿里云 OSS Java SDK | aliyun-sdk-oss 3.18.4，V1 风格 | OSS V4 签名、上传、分片、读封面、预签名下载、删除；不是 AWS SDK |
 | 腾讯云 COS Java SDK | cos_api 5.6.227 | COS HTTPS 上传、顺序分片、封面读取、下载签名和删除；CosProperties 绑定桶、地域、密钥，SDK 自动生成域名 |
+| Spring Data Redis / Lettuce | spring-data-redis 3.5.13；lettuce-core 6.6.0.RELEASE；starter 3.5.16 | CoverCacheService + RedisConfig；通过 RedisTemplate 读写二进制图片，SET 同时设置 6 小时 TTL；未使用 Spring Cache 注解或 Redis 订单锁 |
 | ffprobe / ffmpeg | 外部可执行工具，路径由配置提供 | 上传时媒体探测与首帧解码；不是 Maven 媒体库，不自动转码 |
 | Lombok | Maven 编译依赖，由 Boot 管理版本 | DTO、VO、Entity 的 getter/setter 等生成；不参与接口调用或运行时权限判断 |
 | Spring Scheduling | Spring 内置，PasswordConfig 启用 | 会话清理、失败文件清理重试；不是 Quartz、XXL-JOB |
@@ -123,7 +132,7 @@
 | Spring Boot Test / JUnit / MockMvc / Mockito | test 范围依赖 | Controller、Service、事务和错误分支测试，不是生产业务链 |
 | H2 | test 范围依赖 | 隔离集成测试数据库；真实运行使用 MySQL |
 
-**已引入但业务尚未使用：** `spring-boot-starter-data-redis`（打包中的 spring-data-redis 为 3.5.13），local 也有 Redis 地址配置，但目前业务代码没有 RedisTemplate/StringRedisTemplate/缓存注解的调用。登录、订单防重、扣币均不能描述为“用 Redis 实现”。健康接口的旧注释提到 Redis，实际方法只执行 MySQL `SELECT 1`。
+**Redis 使用边界：** 当前只缓存云端封面，登录、订单防重、扣币仍由既有数据库逻辑实现。local 的连接与命令超时均为 500ms；缓存关闭或 Redis 断开时继续读取 COS/OSS，不让缓存故障变成图片接口故障。本机验证使用 Windows 社区便携版 Redis 8.10.2，启动配置限制 256 MiB、`allkeys-lru`，仅监听 127.0.0.1；不是腾讯云 Redis 服务，也不是 Java 进程内 HashMap。健康接口实际只执行 MySQL `SELECT 1`，不检查 Redis。
 
 **接口文档工具：** 当前维护静态 [OpenAPI YAML][openapi]，用 Apifox 导入测试；没有引入 springdoc/Swagger UI 自动生成库。Apifox 是外部调试工具，不在后端执行链中。
 
@@ -285,10 +294,12 @@ SQL 在 **CategoryMapper.java 的 @Select**：`categories WHERE enabled=1 ORDER 
 ```text
 WallpaperController.page
   → WallpaperService.page → WallpaperServiceImpl.page
-      → new Page；处理关键词、分类 ID
+      → 1. 整理关键词、分类 ID
+      → 2. 创建 Page
       → WallpaperMapper.selectPublishedPage
           → MyBatis-Plus 分页拦截器：COUNT + 分页查询
-      → toVO：生成公开封面 URL
+      → 3. for 循环生成公开封面 URL → toVO(row,coverUrl)
+      → PageVO(items,page,pageSize,total)
   → ApiResponse.success(PageVO)
 ```
 
@@ -307,7 +318,7 @@ WallpaperController.detail
   → WallpaperService.detail → WallpaperServiceImpl.detail
       → CatalogIds.validatePathId / findDatabaseId
       → WallpaperMapper.selectPublishedById
-      → toVO → 公开封面地址
+      → 生成公开封面地址 → toVO(row,coverUrl)
   → ApiResponse.success(WallpaperVO)
 ```
 
@@ -325,14 +336,17 @@ CoverController.read
       → CatalogIds
       → WallpaperMapper.selectPublicCover
       → readFile
-          ├─ COS/OSS：ObjectStorage.readCover → 对应 SDK getObject → ByteArrayResource
-          └─ LOCAL：校验受限路径/实际大小 → FileSystemResource
+          ├─ COS/OSS：按 provider/bucket/objectKey 组成 key → CoverCacheService.getCover
+          │   ├─ 命中且长度一致：直接 ByteArrayResource
+          │   └─ 未命中/Redis故障/长度不符：ObjectStorage.readCover → CosStorage/OssStorage
+          │       → CoverCacheService.putCover（SET + TTL）→ ByteArrayResource
+          └─ LOCAL：normalize + 根目录范围 + 存在/实际大小 → FileSystemResource
   → ResponseEntity<Resource> 输出图片字节
 ```
 
 SQL：wallpapers 的当前封面字段，要求商品 PUBLISHED、封面 READY、有对象键。它不额外执行公开商品详情查询。封面上限 4 MiB，核对 MIME/字节数；不存在或不可见为 404 RESOURCE_NOT_FOUND，存储不可用为 503。读操作不持写事务。
 
-技术：Spring Resource、COS/OSS SDK、本地 NIO、HTTP 缓存头。源码：[Controller][cover-controller] / [封面服务][cover-service] / [SQL][wallpaper-xml]。**此路由已实现，但当前静态 OpenAPI 尚未单列该路径；本文按源码完整纳入。**
+技术：Spring Resource、Spring Data Redis/Lettuce、原始 byte[] 序列化、TTL、COS/OSS SDK、本地 NIO、HTTP 缓存头。源码：[Controller][cover-controller] / [封面服务][cover-service] / [SQL][wallpaper-xml]。**此路由已实现，但当前静态 OpenAPI 尚未单列该路径；本文按源码完整纳入。**
 
 ## 六、管理员分类管理
 
@@ -514,13 +528,17 @@ AdminWallpaperController.setPublication
 AdminWallpaperController.getCover
   → CoverService.readAdmin
       → WallpaperMapper.selectAdminCover
-      → readFile → ObjectStorage.readCover → CosStorage/OssStorage / 本地 Resource
+      → readFile
+          ├─ COS/OSS：CoverCacheService.getCover
+          │   ├─ 命中：图片字节 → ByteArrayResource
+          │   └─ 未命中/缓存故障：ObjectStorage.readCover → COS/OSS → putCover（TTL）
+          └─ LOCAL旧文件：基础路径与大小检查 → FileSystemResource
   → ResponseEntity<Resource>
 ```
 
-不要求商品 PUBLISHED，因此可预览草稿与停售商品；仍要求本商品封面 READY、有对象键。AuthFilter 先检查管理员，不通过公开封面接口放宽权限。不写数据库。
+不要求商品 PUBLISHED，因此可预览草稿与停售商品；仍要求本商品封面 READY、有对象键。AuthFilter 先检查管理员，不通过公开封面接口放宽权限。权限查询完成后才读共享图片缓存，命中不调用云存储。不写数据库。
 
-技术：公共封面服务、权限过滤、Spring Resource、COS/OSS。源码：[Controller][admin-wallpaper-controller] / [封面服务][cover-service] / [SQL][wallpaper-xml]。
+技术：公共封面服务、权限过滤、Spring Resource、Redis 二进制缓存、COS/OSS。源码：[Controller][admin-wallpaper-controller] / [封面服务][cover-service] / [SQL][wallpaper-xml]。
 
 ## 八、订单与壁纸币
 
@@ -619,10 +637,11 @@ OrderController.payOrder
 WallpaperController.getMyWallpapers：绑定并校验 OwnedWallpaperQueryDTO
   → WallpaperService.getMyWallpapers → WallpaperServiceImpl.getMyWallpapers
       → BaseContext.getCurrentId
-      → 创建MyBatis-Plus Page，整理标题、分类及商品筛选
+      → 1. 整理标题、分类及商品筛选
+      → 2. 创建MyBatis-Plus Page
       → WallpaperMapper.selectOwnedWallpapers(page,userId,keyword,categoryId,wallpaperId)
           → 分页插件COUNT统计 + SELECT补LIMIT
-      → for 循环 toVO(row,本账号已购封面 URL)
+      → 3. for 循环生成本账号已购封面 URL → toVO(row,coverUrl)
       → PageVO(items,page,pageSize,total)
   → ApiResponse.success
 ```
@@ -632,6 +651,8 @@ SQL 从 **entitlements e** 开始，`e.user_id=当前用户`；JOIN wallpapers w
 权益表没有 status，存在记录即有效；返回商品当前资料和当前原文件元数据，不返回历史版本。已购封面 URL 为 `/me/wallpapers/{id}/cover`，客户端带 Bearer 获取；没有放宽公开商品查询。此查询保留在 catalog、复用 WallpaperMapper。
 
 Qt调用：顶部“我的已购” → StoreService.syncOwned → ownedPageChanged → 按服务器总数绘制当前页。搜索和分类由服务端筛选，下一页只请求12项；权益减少导致越界时回到最后一页。选中停售商品使用已购资料，不请求公开详情；商城选中商品时以wallpaperId精确筛选查询当前账号权益，避免把不在当前页的已购商品误判为未购买。
+
+两个分页 Service 均按“整理参数 → 创建 Page / Mapper 查询 → for 循环生成封面地址并转换 → 返回 PageVO”组织；只有一个 `toVO(row,coverUrl)` 完成字段映射，不再从一个 toVO 跳到另一个 toVO。公开与已购的 URL、SQL 权限条件各自明确保留。
 
 技术：受权益条件限制的JOIN、MyBatis-Plus分页、账号隔离、VO复用。源码：[Controller][wallpaper-controller] / [实现][wallpaper-service] / [SQL][wallpaper-xml]。详细变更见 [已购分页说明](owned-pagination.md)。
 
@@ -644,13 +665,19 @@ CoverController.readOwned
   → CoverService.readOwned
       → BaseContext + CatalogIds
       → WallpaperMapper.selectOwnedCover(userId,id)
-      → readFile → ObjectStorage.readCover → CosStorage/OssStorage / 本地 Resource
+      → readFile
+          ├─ COS/OSS：CoverCacheService.getCover
+          │   ├─ 命中：图片字节 → ByteArrayResource
+          │   └─ 未命中/缓存故障：ObjectStorage.readCover → COS/OSS → putCover（TTL）
+          └─ LOCAL旧文件：基础路径与大小检查 → FileSystemResource
   → ResponseEntity<Resource>
 ```
 
 SQL：entitlements JOIN wallpapers，条件限定当前用户与目标商品，要求封面 READY、有对象键，不限制发布状态。返回图片和大小，不返回任意文件下载入口。Qt 的 ApiClient.authorizeCoverRequest 仅向当前后端的已购封面入口附带本账号 Bearer，不把它发送给外部 COS/OSS 地址。
 
-技术：权益 SQL、带凭据图片请求、公共封面服务、HTTP no-store。源码：[Controller][cover-controller] / [实现][cover-service] / [SQL][wallpaper-xml]。
+图片缓存命中也必须先通过本次权益 SQL；`no-store` 限制的是客户端/HTTP 中间缓存，后端 Redis 可以在权限查询之后复用图片字节。
+
+技术：权益 SQL、带凭据图片请求、公共封面服务、Redis 缓存、HTTP no-store。源码：[Controller][cover-controller] / [实现][cover-service] / [SQL][wallpaper-xml]。
 
 ### 24. 下载授权：POST /wallpapers/{id}/download-grants
 
@@ -751,11 +778,11 @@ HealthController.health
 - 外部支付、支付回调、购物车、多商品订单：未实现。现有付款是站内壁纸币。
 - 商品 DELETE：当前管理员商品四个业务接口是列表、创建、修改、上下架，没有商品物理删除 HTTP 接口。
 - 独立上传、test-pay：已经移除，不属于本次 25 个接口；FileUploadService 是内部能力。
-- Redis 缓存/分布式锁：依赖已引入，当前业务没有使用。
+- Redis 分布式锁、并发未命中合并、客户端封面磁盘缓存：尚未实现。后端 Redis 封面字节缓存已经实现。
 
 ### 12.4 文档核对范围
 
-本次逐项对照 Controller 映射、实际 Service 调用、Mapper/SQL、配置与打包依赖，不只复制历史 JavaDoc。特别按实际代码纠正理解：健康检查不检查 Redis，公共封面路由虽未单列 OpenAPI 但已经存在，订单返回九字段，当前不保留历史资产；已购采用分页，订单列表仍保留 1000 项上限；云文件调用统一先经过 ObjectStorage。
+本次逐项对照 Controller 映射、实际 Service 调用、Mapper/SQL、配置与打包依赖，不只复制历史 JavaDoc。特别按实际代码纠正理解：健康检查不检查 Redis，公共封面路由虽未单列 OpenAPI 但已经存在，订单返回九字段，当前不保留历史资产；已购采用分页，订单列表仍保留 1000 项上限；云文件调用统一先经过 ObjectStorage；封面在权限查询后先查 Redis，命中跳过云文件读取。
 
 本文是调用链学习文档，不替代请求/响应的完整 schema；具体字段校验继续看 DTO、VO 与 [OpenAPI][openapi]。接口清点验证记录见 [核对记录](api-call-chains-validation.md)。
 
@@ -824,3 +851,6 @@ HealthController.health
 [download-xml]: ../src/main/resources/mapper/download/DownloadMapper.xml
 [health-controller]: ../src/main/java/com/zlo/wallpaper/common/HealthController.java
 [session-cleanup]: ../src/main/java/com/zlo/wallpaper/auth/task/SessionCleanupTask.java
+
+[cover-cache]: ../src/main/java/com/zlo/wallpaper/catalog/service/CoverCacheService.java
+[redis-config]: ../src/main/java/com/zlo/wallpaper/config/RedisConfig.java

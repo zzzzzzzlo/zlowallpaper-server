@@ -41,6 +41,9 @@ wallpaper:
   storage:
     provider: "${STORAGE_PROVIDER:OSS}"
     root: "${WALLPAPER_STORAGE_ROOT:D:/Codex/software/zlowallpaper-storage}"
+  cover-cache:
+    enabled: "${COVER_CACHE_ENABLED:true}"
+    ttl-seconds: "${COVER_CACHE_TTL_SECONDS:21600}" # 写入起6小时过期，不因访问续期
   cos:
     region: "${COS_REGION:}"
     bucket: "${COS_BUCKET:}"

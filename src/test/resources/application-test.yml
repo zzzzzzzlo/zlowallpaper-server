@@ -1,5 +1,7 @@
 # 自动测试使用独立内存数据库，不读取真实密码、不连接商城库。
 wallpaper:
+  cover-cache:
+    enabled: false # 普通回归不依赖本机Redis；缓存行为另用专项测试验证
   auth:
     # 仅用于测试的固定密钥。
     jwt-secret: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="

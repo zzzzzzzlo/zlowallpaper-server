@@ -55,8 +55,9 @@ public class WallpaperServiceImpl implements WallpaperService {
         if (userId == null) {
             throw new BusinessException(HttpStatus.UNAUTHORIZED, "SESSION_EXPIRED", "请先登录");
         }
-        // 标题按普通文本匹配，不能把管理员填写的%或_误当SQL通配符。
-        String keyword = query.getKeyword().strip().replace("!", "!!").replace("%", "!%").replace("_", "!_");
+        // 1. 整理筛选参数；标题按普通文本匹配，不能把%或_当SQL通配符。
+        String keyword = query.getKeyword().strip();
+        keyword = keyword.replace("!", "!!").replace("%", "!%").replace("_", "!_");
         String category = query.getCategoryId().strip();
         Long categoryId = category.isEmpty() ? null : CatalogIds.findDatabaseId(category);
         // 无法映射为数据库ID的非空分类/商品筛选应匹配不到，不能变成“不筛选”。
@@ -67,13 +68,13 @@ public class WallpaperServiceImpl implements WallpaperService {
             wallpaperId = CatalogIds.findDatabaseId(query.getWallpaperId());
             if (wallpaperId == null) { wallpaperId = -1L; }
         }
-        // 只有本入口使用这条权益SQL；分页插件执行COUNT并为下面的SELECT补LIMIT。
+        // 2. 分页查询；只有本入口使用权益SQL，插件执行COUNT并补LIMIT。
         Page<WallpaperRow> page = new Page<>(query.getPage(), query.getPageSize());
         page.setOptimizeJoinOfCountSql(false);
         IPage<WallpaperRow> records = wallpaperMapper.selectOwnedWallpapers(page, userId, keyword, categoryId, wallpaperId);
+        // 3. 逐条转换当前页；已购封面允许本账号读取停售商品。
         List<WallpaperVO> result = new ArrayList<>(records.getRecords().size());
         for (WallpaperRow row : records.getRecords()) {
-            // 已购封面走带身份的专用入口，避免公开封面为下架商品放宽权限。
             String coverUrl = UriComponentsBuilder.fromUriString(publicBaseUrl)
                     .pathSegment("me", "wallpapers", row.id().toString(), "cover").build().toUriString();
             result.add(toVO(row, coverUrl));
@@ -90,19 +91,25 @@ public class WallpaperServiceImpl implements WallpaperService {
      */
     @Override
     public PageVO<WallpaperVO> page(WallpaperQueryDTO query) {
-        var page = new Page<WallpaperRow>(query.getPage(), query.getPageSize());
-        // 只关闭 COUNT SQL 的 LEFT JOIN 自动移除，不影响商品列表查询。
-        // 当前使用 INNER JOIN；此设置约束以后加入 LEFT JOIN 时的计数行为。
-        page.setOptimizeJoinOfCountSql(false);
+        // 1. 整理筛选参数；与我的已购保持相同的顺序和转换方式。
         String keyword = query.getKeyword().strip();
         // 把用户输入中的 LIKE 通配符作为普通标题字符处理。
         keyword = keyword.replace("!", "!!").replace("%", "!%").replace("_", "!_");
         String category = query.getCategoryId().strip();
         Long categoryId = category.isEmpty() ? null : CatalogIds.findDatabaseId(category);
         if (!category.isEmpty() && categoryId == null) { categoryId = -1L; }
-        var result = wallpaperMapper.selectPublishedPage(page, keyword, categoryId);
-        return new PageVO<>(result.getRecords().stream().map(this::toVO).toList(),
-                query.getPage(), query.getPageSize(), result.getTotal());
+        // 2. 分页查询；公开SQL仍只读取已上架且文件就绪的商品。
+        Page<WallpaperRow> page = new Page<>(query.getPage(), query.getPageSize());
+        page.setOptimizeJoinOfCountSql(false);
+        IPage<WallpaperRow> records = wallpaperMapper.selectPublishedPage(page, keyword, categoryId);
+        // 3. 逐条转换当前页；封面使用公开入口。
+        List<WallpaperVO> result = new ArrayList<>(records.getRecords().size());
+        for (WallpaperRow row : records.getRecords()) {
+            String coverUrl = UriComponentsBuilder.fromUriString(publicBaseUrl)
+                    .pathSegment("catalog", "covers", row.id().toString()).build().toUriString();
+            result.add(toVO(row, coverUrl));
+        }
+        return new PageVO<>(result, query.getPage(), query.getPageSize(), records.getTotal());
     }
 
     /**
@@ -120,17 +127,6 @@ public class WallpaperServiceImpl implements WallpaperService {
         if (row == null) {
             throw new BusinessException(HttpStatus.NOT_FOUND, "PRODUCT_NOT_FOUND", "商品不存在或未上架");
         }
-        return toVO(row);
-    }
-
-    /**
-     * 将查询结果或数据库实体逐项转换成前端公开字段，不返回内部存储位置。
-     * 调用/引用位置：WallpaperServiceImpl.detail、WallpaperServiceImpl.page。
-     *
-     * @param row Mapper返回的分类或商品查询行，供当前方法转换为前端VO
-     * @return 公开可见商品资料和当前文件元数据，不包含原文件对象键或下载URL
-     */
-    private WallpaperVO toVO(WallpaperRow row) {
         String coverUrl = UriComponentsBuilder.fromUriString(publicBaseUrl)
                 .pathSegment("catalog", "covers", row.id().toString()).build().toUriString();
         return toVO(row, coverUrl);
@@ -138,7 +134,7 @@ public class WallpaperServiceImpl implements WallpaperService {
 
     /**
      * 复用商品字段转换，封面地址由调用方按公开或已购访问场景生成。
-     * 调用位置：WallpaperServiceImpl.toVO(row)、getMyWallpapers。
+     * 调用位置：WallpaperServiceImpl.page、getMyWallpapers、detail；只有这一层字段转换。
      * @param row 查询返回的当前商品及原文件元数据
      * @param coverUrl 当前访问场景的公开或带身份封面入口
      * @return 沿用现有Product协议的WallpaperVO，不返回内部原文件位置
