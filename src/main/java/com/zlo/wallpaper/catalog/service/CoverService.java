@@ -17,6 +17,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 按公开、管理员或本账号已购权限读取封面，复用本地路径及云文件大小校验。
@@ -31,6 +37,9 @@ public class CoverService {
     private final Path storageRoot;
     @Autowired private ObjectStorage storage;
     @Autowired private CoverCacheService cache;
+    // 只保存本进程正在加载的封面；完成后移除，不作为另一层长期图片缓存。
+    private final ConcurrentMap<String, CompletableFuture<byte[]>> loadingCovers = new ConcurrentHashMap<>();
+    @Value("${wallpaper.cover-cache.wait-seconds:10}") private long waitSeconds = 10;
 
     /**
      * 构造CoverService并保存其依赖或初始属性。
@@ -96,7 +105,7 @@ public class CoverService {
     }
 
     /**
-     * 权限查询完成后读封面：先Redis，未命中再读云存储并写缓存；本地旧文件保留基础路径检查。
+     * 权限查询完成后读封面：先Redis，同键未命中请求共享本进程一次回源；本地旧文件保留基础路径检查。
      * 调用/引用位置：CoverService.read、CoverService.readAdmin、CoverService.readOwned。
      *
      * @param asset 数据库封面位置或可信上传文件元数据，按当前方法所需类型使用
@@ -114,8 +123,44 @@ public class CoverService {
             byte[] bytes = cache.getCover(key);
             if (bytes == null || bytes.length != asset.sizeBytes()) {
                 // 图片字节可以共享，权限不能缓存：三个入口都先查各自的可见性/权益SQL。
-                bytes = storage.readCover(asset.storageProvider(), asset.bucket(), asset.objectKey(), asset.sizeBytes());
-                cache.putCover(key, bytes);
+                CompletableFuture<byte[]> task = new CompletableFuture<>();
+                CompletableFuture<byte[]> running = loadingCovers.putIfAbsent(key, task);
+                if (running == null) {
+                    // 当前请求登记成功，负责回源；不同封面键可以各自加载，不持有全局锁。
+                    try {
+                        // 并发复查：首次查Redis后，前一批请求可能已填好缓存并移除了任务。
+                        // putIfAbsent只确定本批加载者，不锁Redis；复查避免新一批又重复读取COS。
+                        bytes = cache.getCover(key);
+                        if (bytes == null || bytes.length != asset.sizeBytes()) {
+                            bytes = storage.readCover(asset.storageProvider(), asset.bucket(), asset.objectKey(), asset.sizeBytes());
+                            cache.putCover(key, bytes);
+                        }
+                        // 即使Redis不可用，已等候的请求仍能共享本次读到的字节。
+                        task.complete(bytes);
+                    } catch (RuntimeException | Error exception) {
+                        task.completeExceptionally(exception);
+                        throw exception;
+                    } finally {
+                        loadingCovers.remove(key, task);
+                    }
+                } else {
+                    // 已有请求负责同一封面，当前线程等结果，不额外创建异步线程或再次回源。
+                    try {
+                        bytes = running.get(waitSeconds, TimeUnit.SECONDS);
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new BusinessException(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", "封面加载等待已中断，请重试");
+                    } catch (TimeoutException exception) {
+                        // 等待者不能移除/取消仍在执行的任务，否则后续请求会另开一次回源。
+                        throw new BusinessException(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", "封面加载较慢，请稍后重试");
+                    } catch (ExecutionException exception) {
+                        // 解包原异常，让等待者保持回源请求原来的404/503等错误含义。
+                        Throwable cause = exception.getCause();
+                        if (cause instanceof RuntimeException) { throw (RuntimeException) cause; }
+                        if (cause instanceof Error) { throw (Error) cause; }
+                        throw new BusinessException(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", "封面加载失败，请稍后重试");
+                    }
+                }
             }
             return new Cover(new ByteArrayResource(bytes), MediaType.parseMediaType(asset.mimeType()), asset.sizeBytes());
         }

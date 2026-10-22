@@ -20,7 +20,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 验证真实文件签名、容器、尺寸、帧率和首帧，不相信客户端提供的媒体元数据。
+ * 验证真实文件签名、容器、尺寸、帧率和首帧，并将封面压缩为轻量JPEG。
  * 创建方式：Spring组件扫描创建并管理；不需要业务代码手动new。
  * 注入位置：FileUploadServiceImpl.mediaInspector。
  */
@@ -90,6 +90,30 @@ public class MediaInspector {
         } catch (IOException | IllegalArgumentException exception) {
             throw invalid();
         }
+    }
+
+    /**
+     * 将已通过 inspect 的封面生成一张 JPEG：等比例缩小、透明底填白、动态图取首帧。
+     * 调用位置：FileUploadServiceImpl.uploadFile；输入和输出临时文件均由上传方法清理。
+     * @param source 已检查真实格式与解码能力的上传临时文件
+     * @param target 服务器创建的独立 .jpg 临时文件，不覆盖用户原文件
+     * @return 实际输出文件的 MIME、宽高和静态帧率
+     */
+    public MediaMetadata compressCover(Path source, Path target) {
+        int maxEdge = properties.getCoverMaxEdge();
+        // 小图不放大，不裁剪；先缩小再合成白底，减少后续滤镜的内存开销。
+        String filters = "[0:v:0]scale=w='min(iw," + maxEdge + ")':h='min(ih," + maxEdge
+                + ")':force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,split[image][background];"
+                + "[background]lutrgb=r=255:g=255:b=255:a=255[white];"
+                + "[white][image]overlay=shortest=1:format=rgb,setsar=1,format=yuvj420p[cover]";
+        execute(List.of(properties.getFfmpeg(), "-v", "error", "-nostdin", "-y", "-xerror",
+                "-max_alloc", "67108864", "-threads", "1", "-protocol_whitelist", "file,pipe",
+                "-i", source.toString(), "-filter_complex_threads", "1", "-filter_complex", filters,
+                "-map", "[cover]", "-frames:v", "1", "-c:v", "mjpeg", "-threads", "1",
+                "-q:v", Integer.toString(properties.getCoverJpegQuality()), "-map_metadata", "-1",
+                "-update", "1", target.toString()));
+        // 这是生成结果校验：上传源文件已经检查过，这里确认转码产物和实际尺寸。
+        return inspect(target, "jpg", "COVER");
     }
 
     /**

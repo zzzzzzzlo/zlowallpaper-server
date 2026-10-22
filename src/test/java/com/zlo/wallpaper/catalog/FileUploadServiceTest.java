@@ -42,7 +42,10 @@ class FileUploadServiceTest {
     @Mock private Clock clock;
     @InjectMocks private FileUploadServiceImpl service;
     private static final byte[] BYTES = {1, 2, 3, 4};
+    private static final byte[] COMPRESSED = {(byte) 0xff, (byte) 0xd8, (byte) 0xff};
     private Path temporaryFile;
+    private Path sourceFile;
+    private Path compressedFile;
 
     /**
      * 为上传测试设置可信用户身份并配置依赖替身。
@@ -62,19 +65,29 @@ class FileUploadServiceTest {
     @AfterEach void clear() {
         BaseContext.removeCurrentId();
         if (temporaryFile != null) assertFalse(Files.exists(temporaryFile));
+        if (sourceFile != null) assertFalse(Files.exists(sourceFile));
+        if (compressedFile != null) assertFalse(Files.exists(compressedFile));
     }
 
     /**
      * 构造通过媒体检查的元数据，用于隔离测试上传编排。
      * 调用/引用位置：FileUploadServiceTest.cloudFailureKeepsErrorAndCleansTemporaryFile、FileUploadServiceTest.returnsTrustedFileMetadataAndExactOssObjectVersionWithoutDatabase。
-     * 输入参数：无。
-     * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
-     *
+     * @param cover 是否需要模拟封面压缩产物；原文件测试不注册压缩替身
      */
-    private void validMedia() {
+    private void validMedia(boolean cover) {
         MediaMetadata metadata = new MediaMetadata();
         metadata.setMimeType("image/png"); metadata.setWidth(640); metadata.setHeight(480); metadata.setFps(BigDecimal.ZERO);
         when(mediaInspector.inspect(any(), anyString(), anyString())).thenReturn(metadata);
+        if (cover) {
+            when(mediaInspector.compressCover(any(), any())).thenAnswer(call -> {
+                sourceFile = call.getArgument(0);
+                compressedFile = call.getArgument(1);
+                Files.write(compressedFile, COMPRESSED);
+                MediaMetadata compressed = new MediaMetadata();
+                compressed.setMimeType("image/jpeg"); compressed.setWidth(640); compressed.setHeight(480); compressed.setFps(BigDecimal.ZERO);
+                return compressed;
+            });
+        }
         when(clock.instant()).thenReturn(Instant.parse("2026-10-13T00:00:00Z"));
     }
 
@@ -86,10 +99,10 @@ class FileUploadServiceTest {
      *
      */
     @Test void returnsTrustedFileMetadataAndExactOssObjectVersionWithoutDatabase() throws Exception {
-        validMedia();
+        validMedia(true);
         when(ossStorage.upload(any(), anyString(), anyString(), anyLong())).thenAnswer(call -> {
             temporaryFile = call.getArgument(0);
-            assertArrayEquals(BYTES, Files.readAllBytes(temporaryFile));
+            assertArrayEquals(COMPRESSED, Files.readAllBytes(temporaryFile));
             return new StoredObject("private-bucket", call.getArgument(1), "oss-version");
         });
         UploadedFile file = service.uploadFile(file("封面.PNG", BYTES), "COVER");
@@ -97,9 +110,11 @@ class FileUploadServiceTest {
         assertEquals("private-bucket", file.getBucket());
         assertEquals("oss-version", file.getObjectVersionId());
         assertEquals(11L, file.getUploadedBy());
-        assertEquals(4L, file.getSizeBytes());
-        assertEquals(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(BYTES)), file.getSha256());
-        assertTrue(file.getObjectKey().matches("zlowallpaper/covers/[a-f0-9-]{36}\\.png"));
+        assertEquals(3L, file.getSizeBytes());
+        assertEquals("image/jpeg", file.getMimeType());
+        assertEquals("jpg", file.getFileExtension());
+        assertEquals(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(COMPRESSED)), file.getSha256());
+        assertTrue(file.getObjectKey().matches("zlowallpaper/covers/[a-f0-9-]{36}\\.jpg"));
     }
 
     /**
@@ -163,7 +178,7 @@ class FileUploadServiceTest {
      *
      */
     @Test void declaredAndActualCoverLimitsAreEnforced() {
-        byte[] oversized = new byte[4194305];
+        byte[] oversized = new byte[10 * 1024 * 1024 + 1];
         assertEquals(HttpStatus.PAYLOAD_TOO_LARGE, assertThrows(BusinessException.class,
                 () -> service.uploadFile(file("test.png", oversized), "COVER")).getStatus());
         MockMultipartFile lying = new MockMultipartFile("file", "test.png", "image/png", oversized) /**
@@ -210,13 +225,68 @@ class FileUploadServiceTest {
      *
      */
     @Test void cloudFailureKeepsErrorAndCleansTemporaryFile() {
-        validMedia();
+        validMedia(true);
         when(ossStorage.upload(any(), anyString(), anyString(), anyLong())).thenAnswer(call -> {
             temporaryFile = call.getArgument(0);
             throw new BusinessException(HttpStatus.SERVICE_UNAVAILABLE, "OSS_PERMISSION_ERROR", "OSS 授权不足");
         });
         assertEquals("OSS_PERMISSION_ERROR", assertThrows(BusinessException.class,
                 () -> service.uploadFile(file("test.png", BYTES), "COVER")).getCode());
+    }
+
+    @Test void tenMiBCoverIsAcceptedBeforeCompression() {
+        validMedia(true);
+        when(ossStorage.upload(any(), anyString(), anyString(), anyLong()))
+                .thenAnswer(call -> new StoredObject("private-bucket", call.getArgument(1), "version"));
+        UploadedFile result = service.uploadFile(file("large.png", new byte[10 * 1024 * 1024]), "COVER");
+        assertEquals(3L, result.getSizeBytes());
+    }
+
+    @Test void originalBytesAndMetadataAreNotCompressed() throws Exception {
+        validMedia(false);
+        when(ossStorage.upload(any(), anyString(), anyString(), anyLong())).thenAnswer(call -> {
+            temporaryFile = call.getArgument(0);
+            assertArrayEquals(BYTES, Files.readAllBytes(temporaryFile));
+            return new StoredObject("private-bucket", call.getArgument(1), "version");
+        });
+        UploadedFile result = service.uploadFile(file("wallpaper.png", BYTES), "ORIGINAL");
+        assertEquals(4L, result.getSizeBytes());
+        assertEquals("png", result.getFileExtension());
+        assertEquals(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(BYTES)), result.getSha256());
+        verify(mediaInspector, never()).compressCover(any(), any());
+    }
+
+    @Test void compressionFailureNeverUploadsAndCleansBothTemporaryFiles() {
+        MediaMetadata metadata = new MediaMetadata();
+        when(mediaInspector.inspect(any(), anyString(), anyString())).thenReturn(metadata);
+        when(mediaInspector.compressCover(any(), any())).thenAnswer(call -> {
+            if (sourceFile != null) { assertFalse(Files.exists(sourceFile)); }
+            if (compressedFile != null) { assertFalse(Files.exists(compressedFile)); }
+            sourceFile = call.getArgument(0);
+            compressedFile = call.getArgument(1);
+            Files.write(compressedFile, COMPRESSED);
+            throw new BusinessException(HttpStatus.SERVICE_UNAVAILABLE, "MEDIA_SERVICE_UNAVAILABLE", "压缩失败");
+        });
+        // 槽位总数为2，连续失败3次仍进入压缩，才能证明没有泄漏槽位。
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertEquals("MEDIA_SERVICE_UNAVAILABLE", assertThrows(BusinessException.class,
+                    () -> service.uploadFile(file("cover.png", BYTES), "COVER")).getCode());
+        }
+        verifyNoInteractions(ossStorage);
+    }
+
+    @ParameterizedTest @ValueSource(ints = {0, 4194305})
+    void invalidCompressedSizeNeverReachesStorage(int size) {
+        when(mediaInspector.inspect(any(), anyString(), anyString())).thenReturn(new MediaMetadata());
+        when(mediaInspector.compressCover(any(), any())).thenAnswer(call -> {
+            sourceFile = call.getArgument(0);
+            compressedFile = call.getArgument(1);
+            Files.write(compressedFile, new byte[size]);
+            return new MediaMetadata();
+        });
+        assertEquals("INVALID_MEDIA", assertThrows(BusinessException.class,
+                () -> service.uploadFile(file("cover.png", BYTES), "COVER")).getCode());
+        verifyNoInteractions(ossStorage);
     }
 
     /**

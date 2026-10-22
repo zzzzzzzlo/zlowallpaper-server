@@ -32,14 +32,14 @@ import java.util.UUID;
 import java.util.concurrent.Semaphore;
 
 /**
- * 将上传内容写入临时文件并校验大小、哈希和真实媒体信息，然后上传私有OSS。
+ * 将上传内容写入临时文件并检查真实媒体；封面压缩后更新元数据，再上传私有COS/OSS。
  * 创建方式：Spring组件扫描创建并管理；不需要业务代码手动new。
  * 注入位置：AdminWallpaperServiceImpl.uploader。
  */
 @Service
 public class FileUploadServiceImpl implements FileUploadService {
     private static final Logger log = LoggerFactory.getLogger(FileUploadServiceImpl.class);
-    private static final long COVER_LIMIT = 4L * 1024 * 1024;
+    private static final long COVER_LIMIT = 10L * 1024 * 1024;
     private static final long ORIGINAL_LIMIT = 10L * 1024 * 1024 * 1024;
     private static final Set<String> EXTENSIONS = Set.of("jpg", "jpeg", "png", "bmp", "webp", "gif", "mp4", "webm", "mov", "avi");
     // 【并发控制：上传槽位】同一后端进程最多同时处理两份文件，限制临时磁盘和媒体解析负载。
@@ -78,12 +78,29 @@ public class FileUploadServiceImpl implements FileUploadService {
             throw new BusinessException(HttpStatus.TOO_MANY_REQUESTS, "UPLOAD_BUSY", "当前上传任务较多，请稍后重试");
         }
         Path temporaryFile = null;
+        Path compressedFile = null;
         try {
             // 2. 边复制边计算完整SHA；再解析实际媒体内容，得到可信宽高、帧率和类型。
             temporaryFile = Files.createTempFile("zlo-upload-", "." + extension);
             UploadedFile asset = new UploadedFile();
             copyAndHash(file, temporaryFile, limit, asset);
             MediaMetadata media = mediaInspector.inspect(temporaryFile, extension, purpose);
+            Path uploadFile = temporaryFile;
+            if ("COVER".equals(purpose)) {
+                // 封面压缩在上传槽位内、数据库事务外；原壁纸文件不进入此分支。
+                compressedFile = Files.createTempFile("zlo-cover-", ".jpg");
+                media = mediaInspector.compressCover(temporaryFile, compressedFile);
+                long compressedSize = Files.size(compressedFile);
+                // 输入放宽到10 MiB，输出仍遵守数据库/读取接口已有的4 MiB契约。
+                if (compressedSize <= 0 || compressedSize > 4L * 1024 * 1024) {
+                    throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_MEDIA", "封面压缩结果无效或超过4 MiB，请调整封面后重试");
+                }
+                asset.setSizeBytes(compressedSize);
+                asset.setSha256(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(Files.readAllBytes(compressedFile))));
+                extension = "jpg";
+                uploadFile = compressedFile;
+            }
             asset.setPurpose(purpose);
             asset.setOriginalFilename(filename);
             // UUID 文件键由服务器生成，原文件名只作展示，不参与存储路径。
@@ -100,7 +117,7 @@ public class FileUploadServiceImpl implements FileUploadService {
             asset.setCreatedAt(currentTime);
             asset.setUpdatedAt(currentTime);
             // 3. 上传OSS并返回元数据。商品是否保存成功以及文件回收由外层商品Service决定。
-            StoredObject stored = storage.upload(temporaryFile, asset.getObjectKey(), asset.getMimeType(), asset.getSizeBytes());
+            StoredObject stored = storage.upload(uploadFile, asset.getObjectKey(), asset.getMimeType(), asset.getSizeBytes());
             asset.setStorageProvider(stored.getProvider());
             asset.setBucket(stored.getBucket());
             asset.setObjectVersionId(stored.getVersionId());
@@ -108,11 +125,14 @@ public class FileUploadServiceImpl implements FileUploadService {
             return asset;
         } catch (IOException exception) {
             throw new BusinessException(HttpStatus.SERVICE_UNAVAILABLE, "UPLOAD_IO_ERROR", "上传文件暂不可处理，请检查本机临时磁盘空间");
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 不可用", exception);
         } finally {
-            if (temporaryFile != null) {
-                try { Files.deleteIfExists(temporaryFile); }
+            for (Path temporary : new Path[]{temporaryFile, compressedFile}) {
+                if (temporary == null) { continue; }
+                try { Files.deleteIfExists(temporary); }
                 catch (IOException exception) {
-                    temporaryFile.toFile().deleteOnExit();
+                    temporary.toFile().deleteOnExit();
                     log.warn("上传临时文件清理失败，需检查临时目录权限");
                 }
             }
@@ -204,6 +224,6 @@ public class FileUploadServiceImpl implements FileUploadService {
      * @return 供调用方抛出的业务异常，携带安全消息与实际HTTP状态
      */
     private BusinessException tooLarge() {
-        return new BusinessException(HttpStatus.PAYLOAD_TOO_LARGE, "FILE_TOO_LARGE", "封面最大4 MiB，原文件最大10 GiB");
+        return new BusinessException(HttpStatus.PAYLOAD_TOO_LARGE, "FILE_TOO_LARGE", "封面上传最大10 MiB，原文件最大10 GiB");
     }
 }
