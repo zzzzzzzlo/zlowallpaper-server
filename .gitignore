@@ -8,4 +8,6 @@ out/
 *.log
 .local-setup/
 .playwright-cli/
-output/playwright/
+# 本机验证产物、脚本备份、截图和文件样张不属于源码。
+output/
+.m2/

@@ -1,18 +1,12 @@
-# ZloWallpaper：已实现接口调用链与技术说明
+# ZloWallpaper：接口调用链与技术说明
 
-核对日期：2026-10-18。以本机当前 Java、Mapper XML、配置和打包依赖为依据。
+核对日期：2026-10-22。以当前Controller、Service、Mapper XML与配置为依据，统一前缀为/api/v1，下文省略此前缀。本文覆盖25个已实现后端HTTP接口，公共封面辅助入口也在文中说明。
 
-存储接入更新：当前已支持腾讯云 COS 与阿里云 OSS。以下文件链路统一经过 `ObjectStorage`，上传由 `STORAGE_PROVIDER` 决定，读取、签名和删除由数据库文件/清理任务自己的 provider 决定。本机已迁移到 COS，新上传使用 COS；旧 OSS 适配保留用于过渡和回退。迁移操作与验收见 [COS 迁移说明](cos-migration.md)。云厂商切换不改变业务 HTTP 路径或字段。
+先看公共调用类，再按接口阅读执行顺序、SQL、事务和技术。接口完整字段见[OpenAPI](api/openapi.yaml)，文件存储见[存储说明](storage.md)。后端不包含网页或Qt源码；这些客户端调用同一套接口。
 
-已购分页更新：`GET /me/wallpapers` 现在返回 `data={items,page,pageSize,total}`，默认每页 12 条、最多 50 条；取消原 200 项总量上限。支持标题、分类和商品精确筛选，Qt 翻页和跨页权益识别已同步。订单列表仍是最多 1000 项的数组，这两个接口不要混淆。
+当前封面在可见性/权益检查后使用Redis字节缓存，未命中在同JVM合并相同对象键回源。上传源封面最大10 MiB，生成长边1920、JPEG q=2的图片，存储/读取仍最大4 MiB。已购使用分页，订单列表仍最多1000项。
 
-封面缓存更新：三个封面入口在各自的数据库可见性/权益检查之后，共享 Redis 中的图片字节；未命中再读 COS/OSS，写入起 6 小时过期。替换文件使用新对象键，Redis 不可用则回源。`WallpaperServiceImpl` 两个分页入口统一为“整理参数 → 分页查询 → 循环转换”，只保留一个 `toVO(row,coverUrl)`。配置和实测见 [封面缓存说明](cover-cache-development.md)。
-
-阅读方式：先看公共类，再通过下面的接口索引跳转。本文使用纯 Markdown 标题、代码块和标题链接；Obsidian 可在阅读视图或实时预览中查看。尖括号类型统一放在代码标记内，避免被当作 HTML。
-
-本文覆盖 **25 个已经实现的后端 HTTP 接口**，统一前缀为 `/api/v1`，下文路径省略此前缀。先说明公共调用类，再按接口列出实际执行顺序、读写的数据和使用的技术。`A → B` 表示直接调用；链路中的分支和事务边界会单独写出。
-
-源码根目录：`E:\zlowallpaper_sever`。公共层在 `src/main/java/com/zlo/wallpaper` 下；数据库 SQL 主要在 `src/main/resources/mapper`。本文中的源码链接均指向本项目文件。
+源码公共根包为src/main/java/com/zlo/wallpaper，SQL位于src/main/resources/mapper。以下源码链接均相对本仓库，不依赖开发机绝对路径。
 
 ## 一、先看公共调用类
 
@@ -78,20 +72,22 @@
 
 | 类 / 入口方法 | 职责 | 调用者与边界 |
 | --- | --- | --- |
-| [FileUploadServiceImpl][file-upload]：`uploadFile` | 单份文件的大小/扩展名、临时复制与 SHA-256、媒体解析、COS/OSS 上传；返回可信 `UploadedFile` 元数据 | AdminWallpaperServiceImpl 的创建/修改；**没有独立上传 HTTP 接口**，不在这里保存商品 |
-| [MediaInspector][media-inspector]：`inspect` | `checkSignature` 查真实文件头；调用 ffprobe 查格式/宽高/帧率，再用 ffmpeg 实际解码首帧并丢弃输出，确认画面数据可解码；不保存截图或修改原文件，也不保证后续每帧完好 | FileUploadServiceImpl；外部进程通过 ProcessBuilder 参数列表启动，单次配置超时 20 秒 |
+| [FileUploadServiceImpl][file-upload]：`uploadFile` | 单份文件的大小/扩展名、临时复制与 SHA-256、媒体解析；仅 COVER 调用压缩并重新计算最终大小/哈希，然后上传 COS/OSS；返回可信 `UploadedFile` 元数据 | AdminWallpaperServiceImpl 的创建/修改；**没有独立上传 HTTP 接口**，不在这里保存商品 |
+| [MediaInspector][media-inspector]：`inspect/compressCover` | `inspect` 检查真实签名、ffprobe 元数据和 ffmpeg 首帧解码；新增的唯一方法 `compressCover` 生成一张缩小后的白底 JPEG，再复用 inspect 检查生成结果；原壁纸不转码 | FileUploadServiceImpl；复用 execute 启动外部工具和超时清理，无新增媒体库或业务类 |
 | [ObjectStorage][object-storage] | `upload/readCover/createDownloadUrl/deleteObject` 集中选择云存储实现 | 上传按配置；读取/签名/删除按文件 provider，业务 Service 不重复分流 |
 | [CosStorage][cos-storage] / [OssStorage][oss-storage] | 小文件直接上传、大文件顺序分片；读封面；签原文件临时地址；精确删除对象/存储版本 | ObjectStorage 调用；分别封装腾讯云 COS、阿里云 OSS 官方 SDK |
 | [WallpaperPersistenceService][wallpaper-persistence] | `create/update/publish` 在短数据库事务内写商品；重新核对权限、分类、商品文件快照 | AdminWallpaperServiceImpl 调用的另一 Spring Bean；长时间云文件上传发生在进入这些事务之前 |
 | [ProductFileCleanupService][file-cleanup] | `trackUpload` 登记待清理对象；`completeUpload` 结束跟踪；`rollbackUpload` 回收失败上传；`retireFile` 回收替换前文件 | 商品 Service 编排；先用 `AdminWallpaperMapper.countFileReferences` 查引用，确认无人引用才删除对应云对象。失败保留本地 JSON 任务重试 |
-| [CoverService][cover-service]：`read/readAdmin/readOwned → readFile` | 三种可见性分别查数据库后，共用封面读取；云文件先查 Redis，未命中再读 COS/OSS；本地旧数据检查规范化路径、目录范围、文件存在与大小 | 公开/已购 CoverController 和管理员商品 Controller；成功返回 Resource、媒体类型与大小 |
+| [CoverService][cover-service]：`read/readAdmin/readOwned → readFile` | 三种可见性分别查数据库后，共用封面读取；先查 Redis，未命中用 ConcurrentHashMap/CompletableFuture 合并本进程同键回源；加载者复查再读 COS/OSS，等待者共享结果；本地旧数据检查路径与大小 | 公开/已购 CoverController 和管理员商品 Controller；成功返回 Resource、媒体类型与大小 |
 | [CoverCacheService][cover-cache]：`getCover/putCover` | 只读写 Redis 图片字节；未命中或连接失败返回 null，写入与 TTL 一次完成；不查询权限 | 注入 CoverService，云文件分支调用；默认启用、TTL 21600 秒，异常仅记 debug 日志 |
 | [RedisConfig][redis-config]：`coverRedisTemplate` | 创建 `RedisTemplate<String,byte[]>`，键使用字符串、值直接使用原始字节序列化 | Spring 创建并注入 CoverCacheService；底层由 Boot 配置的 Lettuce 连接 Redis |
 | [AssetConfig][asset-config]、[CosProperties][cos-properties]、[OssProperties][oss-properties]、[UploadProperties][upload-properties] | 绑定 COS/OSS 和媒体工具配置 | 当前属于商品文件配置；AssetConfig 名称保留，不表示仍有 assets 表或独立资产模块 |
 
 上传使用 JVM 内的 `Semaphore(2)`，拿不到槽位立即返回 `429 UPLOAD_BUSY`；处理完在 finally 释放。它限制同一进程同时处理的**文件任务**，不是全系统最多两个商品请求，也不是 Redis 分布式锁。一次创建顺序处理封面、原文件。
 
-缓存键为 `cover:v1:{provider}:{bucket}:{objectKey}`。上传替换封面生成新 UUID 对象键，因此新请求不会命中旧文件缓存；旧键等待 TTL 到期或 Redis 淘汰。缓存只存图片字节，不缓存可见性、账号或权益：每次请求都先执行数据库查询，商品下架或权益记录删除后仍按当前权限拒绝。缓存命中检查字节长度，云文件读取仍检查实际大小。首版不合并同一图片的并发未命中请求，不使用分布式锁。
+缓存键为 `cover:v1:{provider}:{bucket}:{objectKey}`。上传替换封面生成新 UUID 对象键，因此新请求不会命中旧文件缓存；旧键等待 TTL 到期或 Redis 淘汰。缓存只存图片字节，不缓存可见性、账号或权益：每次请求都先执行数据库查询，商品下架或权益记录删除后仍按当前权限拒绝。缓存命中检查字节长度，云文件读取仍检查实际大小。
+
+`readFile` 云分支先读取缓存；未命中用同键 `putIfAbsent` 登记共享任务，已有任务的请求最多等待10秒。**并发复查：** 登记成功后再次读Redis，因为第一次查询后前一批可能已回源完成并移除任务；仍未命中才读云、写Redis、完成共享结果，finally清除任务。失败传递原异常，等待超时/中断为503，不取消任务或另开回源。不同键并行，仅同JVM合并；Redis关闭或故障时，仍可共享正在进行的读取。没有分布式锁或全局回源限流。
 
 本地旧文件只做基础防御：`normalize → startsWith(storageRoot) → isRegularFile → size`，保留 MIME 白名单和 4 MiB 上限；不再逐段检查符号链接及真实路径。本地根目录由后端管理，客户端不能指定任意文件路径。
 
@@ -124,7 +120,7 @@
 | 阿里云 OSS Java SDK | aliyun-sdk-oss 3.18.4，V1 风格 | OSS V4 签名、上传、分片、读封面、预签名下载、删除；不是 AWS SDK |
 | 腾讯云 COS Java SDK | cos_api 5.6.227 | COS HTTPS 上传、顺序分片、封面读取、下载签名和删除；CosProperties 绑定桶、地域、密钥，SDK 自动生成域名 |
 | Spring Data Redis / Lettuce | spring-data-redis 3.5.13；lettuce-core 6.6.0.RELEASE；starter 3.5.16 | CoverCacheService + RedisConfig；通过 RedisTemplate 读写二进制图片，SET 同时设置 6 小时 TTL；未使用 Spring Cache 注解或 Redis 订单锁 |
-| ffprobe / ffmpeg | 外部可执行工具，路径由配置提供 | 上传时媒体探测与首帧解码；不是 Maven 媒体库，不自动转码 |
+| ffprobe / ffmpeg | 外部可执行工具，路径由配置提供 | 上传时媒体探测与首帧解码；封面通过 scale、白底合成与 mjpeg 编码压缩；不是 Maven 媒体库，原壁纸不转码 |
 | Lombok | Maven 编译依赖，由 Boot 管理版本 | DTO、VO、Entity 的 getter/setter 等生成；不参与接口调用或运行时权限判断 |
 | Spring Scheduling | Spring 内置，PasswordConfig 启用 | 会话清理、失败文件清理重试；不是 Quartz、XXL-JOB |
 | SLF4J / Boot 日志体系 | Boot 管理 | requestId、依赖不可用、COS/OSS 错误、清理重试等日志 |
@@ -136,7 +132,7 @@
 
 **接口文档工具：** 当前维护静态 [OpenAPI YAML][openapi]，用 Apifox 导入测试；没有引入 springdoc/Swagger UI 自动生成库。Apifox 是外部调试工具，不在后端执行链中。
 
-**前端消费者使用的技术：** Qt 客户端采用 C++17、Qt6 Widgets/Network/Concurrent，当前运行包 Qt 6.11.1（CMake 要求至少 6.8）。`ApiClient` 发 HTTP，`StoreService` 编排接口，信号/槽更新 UI；`QPropertyAnimation` 实现渐隐提示，`QSaveFile` 原子保存，Windows DPAPI 保护登录凭据，libmpv/FFmpeg 提供媒体能力。工作台采用原生 HTML/CSS/ES Modules，`api.js` 封装请求，fetch 与 multipart XMLHttpRequest 分别处理普通调用和上传进度；Node 提供本地静态服务，Playwright/Node Test/Prettier 属于开发测试工具。它们不是后端 Service 依赖。
+**前端消费者使用的技术：** Qt 客户端采用 C++17、Qt6 Widgets/Network/Concurrent，当前运行包 Qt 6.11.1（CMake 要求至少 6.8）。`ApiClient` 发 HTTP，`StoreService` 编排接口，信号/槽更新 UI；`QPropertyAnimation` 实现渐隐提示，`QSaveFile` 原子保存，Windows DPAPI 保护登录凭据，libmpv/FFmpeg 提供媒体能力。工作台采用原生 HTML/CSS/ES Modules，`api.js` 封装请求，fetch 与 multipart XMLHttpRequest 分别处理普通调用和上传进度；Node 提供本地静态服务。新用户网页采用 Vue 3.5.44、Vite 7.3.7 与官方 Vue 插件 6.0.10；`App.vue` 集中业务编排、`services/api.js` 统一 fetch/会话/Bearer/共享令牌刷新，原生 dialog 和 Popover 分别提供弹窗与提示，BigInt 保持字符串余额的精度。Vite 只负责本机代理和编译，不承担登录权限。Playwright、Node Test、Prettier 属于开发测试工具。它们不是后端 Service 依赖。
 
 ## 三、25 个接口索引
 
@@ -338,8 +334,10 @@ CoverController.read
       → readFile
           ├─ COS/OSS：按 provider/bucket/objectKey 组成 key → CoverCacheService.getCover
           │   ├─ 命中且长度一致：直接 ByteArrayResource
-          │   └─ 未命中/Redis故障/长度不符：ObjectStorage.readCover → CosStorage/OssStorage
-          │       → CoverCacheService.putCover（SET + TTL）→ ByteArrayResource
+          │   └─ 未命中/Redis故障/长度不符：按key登记或等待共享任务
+          │       ├─ 等待者：共享结果，超时/中断503，不取消加载者
+          │       └─ 加载者：并发复查Redis → 仍未命中才ObjectStorage.readCover
+          │           → CosStorage/OssStorage → putCover（SET + TTL）→ 完成任务并清理
           └─ LOCAL：normalize + 根目录范围 + 存在/实际大小 → FileSystemResource
   → ResponseEntity<Resource> 输出图片字节
 ```
@@ -461,7 +459,7 @@ AdminWallpaperController.createWallpaper
 异常分支：cleanup.rollbackUpload 已拿到元数据的文件 → 原异常继续抛出
 ```
 
-第 3、4 步内部：FileUploadServiceImpl.uploadFile → Semaphore 槽位 → copyAndHash → MediaInspector.inspect → ObjectStorage.upload → CosStorage/OssStorage.upload。小于等于 8 MiB 用 putObject，更大用每片最多 8 MiB 的顺序分片上传；前端通过后端上传，不把大文件整体读入内存。上传组件本身不插入商品。
+第 3、4 步内部：FileUploadServiceImpl.uploadFile → Semaphore 槽位 → copyAndHash → MediaInspector.inspect → 仅 COVER：compressCover → inspect 校验生成结果 → 按最终 JPEG 重算大小/SHA-256 → ObjectStorage.upload → CosStorage/OssStorage.upload。压缩、上传都在短数据库事务之前、同一上传槽位之内；finally 清理源文件和压缩文件。原文件保持流式复制/哈希，不进入封面压缩分支。上传源封面最大 10 MiB，最终封面仍最大 4 MiB。云上传小于等于 8 MiB 用 putObject，更大用每片最多 8 MiB 的顺序分片；上传组件本身不插入商品。
 
 **并发复查：** 上传前普通读分类，尽早拒绝无效分类；上传后在事务里 FOR UPDATE 读取并锁分类，保护检查之后到写入提交之间的分类状态。账号权限在请求开始已查，长上传后写库前再查一次当前管理员状态；此用户查询不加行锁，不能宣称它锁住了此后所有角色变化。
 
@@ -531,7 +529,7 @@ AdminWallpaperController.getCover
       → readFile
           ├─ COS/OSS：CoverCacheService.getCover
           │   ├─ 命中：图片字节 → ByteArrayResource
-          │   └─ 未命中/缓存故障：ObjectStorage.readCover → COS/OSS → putCover（TTL）
+          │   └─ 未命中/缓存故障：共享同键任务；加载者复查Redis后回源并写缓存，等待者复用结果
           └─ LOCAL旧文件：基础路径与大小检查 → FileSystemResource
   → ResponseEntity<Resource>
 ```
@@ -654,7 +652,7 @@ Qt调用：顶部“我的已购” → StoreService.syncOwned → ownedPageChan
 
 两个分页 Service 均按“整理参数 → 创建 Page / Mapper 查询 → for 循环生成封面地址并转换 → 返回 PageVO”组织；只有一个 `toVO(row,coverUrl)` 完成字段映射，不再从一个 toVO 跳到另一个 toVO。公开与已购的 URL、SQL 权限条件各自明确保留。
 
-技术：受权益条件限制的JOIN、MyBatis-Plus分页、账号隔离、VO复用。源码：[Controller][wallpaper-controller] / [实现][wallpaper-service] / [SQL][wallpaper-xml]。详细变更见 [已购分页说明](owned-pagination.md)。
+技术：受权益条件限制的JOIN、MyBatis-Plus分页、账号隔离、VO复用。源码：[Controller][wallpaper-controller] / [实现][wallpaper-service] / [SQL][wallpaper-xml]。已购入口继续沿用catalog模块和WallpaperMapper，不新增资产业务层。
 
 ### 23. 已购封面：GET /me/wallpapers/{id}/cover
 
@@ -668,7 +666,7 @@ CoverController.readOwned
       → readFile
           ├─ COS/OSS：CoverCacheService.getCover
           │   ├─ 命中：图片字节 → ByteArrayResource
-          │   └─ 未命中/缓存故障：ObjectStorage.readCover → COS/OSS → putCover（TTL）
+          │   └─ 未命中/缓存故障：共享同键任务；加载者复查Redis后回源并写缓存，等待者复用结果
           └─ LOCAL旧文件：基础路径与大小检查 → FileSystemResource
   → ResponseEntity<Resource>
 ```
@@ -778,20 +776,20 @@ HealthController.health
 - 外部支付、支付回调、购物车、多商品订单：未实现。现有付款是站内壁纸币。
 - 商品 DELETE：当前管理员商品四个业务接口是列表、创建、修改、上下架，没有商品物理删除 HTTP 接口。
 - 独立上传、test-pay：已经移除，不属于本次 25 个接口；FileUploadService 是内部能力。
-- Redis 分布式锁、并发未命中合并、客户端封面磁盘缓存：尚未实现。后端 Redis 封面字节缓存已经实现。
+- Redis 分布式锁、全局回源限流、客户端封面磁盘缓存：尚未实现。后端 Redis 封面字节缓存及同JVM并发未命中合并已实现。
 
 ### 12.4 文档核对范围
 
 本次逐项对照 Controller 映射、实际 Service 调用、Mapper/SQL、配置与打包依赖，不只复制历史 JavaDoc。特别按实际代码纠正理解：健康检查不检查 Redis，公共封面路由虽未单列 OpenAPI 但已经存在，订单返回九字段，当前不保留历史资产；已购采用分页，订单列表仍保留 1000 项上限；云文件调用统一先经过 ObjectStorage；封面在权限查询后先查 Redis，命中跳过云文件读取。
 
-本文是调用链学习文档，不替代请求/响应的完整 schema；具体字段校验继续看 DTO、VO 与 [OpenAPI][openapi]。接口清点验证记录见 [核对记录](api-call-chains-validation.md)。
+本文是调用链学习文档，不替代请求/响应的完整 schema；具体字段校验继续看 DTO、VO 与 [OpenAPI][openapi]。验收方式见 [测试说明](integration-testing.md)。
 
 ## 源码链接
 
 [pom]: ../pom.xml
 [app-yaml]: ../src/main/resources/application.yml
 [local-yaml]: ../src/main/resources/application-local.yml
-[openapi]: frintend-docks/openapi.yaml
+[openapi]: api/openapi.yaml
 [request-id]: ../src/main/java/com/zlo/wallpaper/common/RequestIdFilter.java
 [web-config]: ../src/main/java/com/zlo/wallpaper/config/WebConfig.java
 [auth-filter]: ../src/main/java/com/zlo/wallpaper/auth/filter/AuthFilter.java

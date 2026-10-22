@@ -254,7 +254,7 @@ paths:
         Cache-Control为no-store。公开/catalog/covers/{id}继续只允许已上架商品。
       responses:
         '200':
-          description: 封面图片，最大4MiB
+          description: 上传源封面最大10MiB；服务端生成长边最多1920像素、q=2的JPEG，实际存储/响应最大4MiB
           content:
             image/png: { schema: { type: string, format: binary } }
             image/jpeg: { schema: { type: string, format: binary } }
@@ -714,7 +714,7 @@ components:
         categoryId: { type: string }
         priceCents: { type: integer, minimum: 0, maximum: 100000000, description: 壁纸币价格最小单位，100单位=1币 }
         originalFile: { type: string, format: binary, description: 原文件最大10GiB；修改时省略则保留 }
-        coverFile: { type: string, format: binary, description: 封面最大4MiB；修改时省略则保留 }
+        coverFile: { type: string, format: binary, description: 上传源封面最大10MiB，服务端压缩为JPEG；修改时省略则保留 }
         creator: { type: string, maxLength: 120 }
     AdminProduct:
       type: object

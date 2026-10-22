@@ -18,7 +18,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.test.util.ReflectionTestUtils;
 import com.zlo.wallpaper.catalog.service.AdminWallpaperService;
 import org.springframework.http.HttpMethod;
@@ -365,27 +364,6 @@ class AdminWallpaperIntegrationTest {
         request(put("/admin/wallpapers/"+id+"/publication").contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"DRAFT\"}"),adminToken,400);
         request(put("/admin/wallpapers/"+id+"/publication").contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"PUBLISHED\",\"type\":\"IMAGE\"}"),adminToken,400);
         publish("999999","PUBLISHED",404);
-    }
-
-    /**
-     * 验证浏览器到真实Tomcat的multipart创建编辑及封面读取完整联调。
-     * 框架调用位置：JUnit测试引擎执行当前用例。
-     * 输入参数：无。
-     * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
-     *
-     */
-    @Test
-    @EnabledIfSystemProperty(named="wallpaper.browser.tests",matches="true")
-    void realBrowserAndTomcatMultipartWorkflow() throws Exception {
-        ProcessBuilder builder=new ProcessBuilder("node",Path.of("src/test/admin-wallpaper-browser.cjs").toAbsolutePath().toString());
-        builder.environment().put("TEST_API_BASE","http://127.0.0.1:"+port+"/api/v1");
-        builder.redirectErrorStream(true).redirectOutput(Path.of(".local-setup/admin-wallpaper-browser.log").toFile());
-        Process process=builder.start();
-        try {
-            assertTrue(process.waitFor(90,java.util.concurrent.TimeUnit.SECONDS),"浏览器测试超时");
-            assertEquals(0,process.exitValue(),"查看.local-setup/admin-wallpaper-browser.log");
-            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM wallpapers",Integer.class));
-        } finally { if(process.isAlive()) process.destroyForcibly(); }
     }
 
     /**

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$RedisDirectory = 'D:\Codex\software\redis-8.10.2\Redis-8.10.2-Windows-x64-msys2'
 )
 
@@ -25,7 +25,7 @@ for ($attempt = 0; $attempt -lt 20; $attempt++) {
     Start-Sleep -Milliseconds 250
     if (Get-NetTCPConnection -LocalPort 6379 -State Listen -ErrorAction SilentlyContinue) {
         $reply = & $client -h 127.0.0.1 -p 6379 ping 2>$null
-        if ($reply -eq 'PONG') { Write-Output 'Redis已启动：127.0.0.1:6379，最大256MiB，allkeys-lru。'; return }
+        if ($reply -eq 'PONG') { Write-Output "Redis已启动：127.0.0.1:6379，配置文件：$config"; return }
     }
 }
 throw 'Redis未能启动，请检查程序目录、配置和6379端口。'

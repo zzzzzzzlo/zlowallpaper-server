@@ -1,133 +1,83 @@
-# ZloWallpaper Spring Boot 后端
+# ZloWallpaper Server
 
-2026-10-17：我的已购已改为MyBatis-Plus分页，默认每页12条、最多50条，支持搜索/分类及商品精确筛选，取消200张列表总量限制；Qt客户端同步适配。新协议和调用链见 [已购分页说明](docs/owned-pagination.md)。
+壁纸商城的 Spring Boot 后端，提供账号认证、商品管理、站内壁纸币购买、已购查询和受保护的原文件下载。网页、Qt 桌面客户端与管理员工作台通过同一套 HTTP 接口访问。
 
-当前阶段：auth、catalog公开查询/分类与商品管理、内部云存储上传、订单创建/查询、壁纸币付款、我的壁纸和短时下载授权已实现。文件信息直接保存商品行，不保留独立assets表或商品历史版本。工作台保存一次提交资料与文件；两端界面已适配壁纸币、个人信息/余额、已购封面身份读取及停售详情，详见[前端统一修复说明](docs/frontend-reconciliation.md)。新增链路见[已购与下载开发说明](docs/download-development.md)。
+## 已实现的功能
 
-2026-10-16：本机现有42份资源已迁移腾讯云COS，SHA-256及大小逐份核对一致，新上传默认COS。HTTP协议及商品、订单、权益不变；旧OSS文件保留回退。配置与迁移命令见 [COS接入与迁移](docs/cos-migration.md)。
+- 注册、登录、刷新令牌、登出及个人资料/余额查询；BCrypt 密码哈希、JWT 访问令牌，MySQL 保存会话。
+- 分类管理、商城分页/搜索/详情，管理员通过一次 multipart 请求创建或修改商品，支持草稿、上架与停售。
+- 创建订单、免费领取和壁纸币付款；扣余额、订单状态和权益在同一事务提交，重复付款不重复扣币。
+- 我的已购分页及短时下载授权；已购用户仍能读取自己购买的停售商品。
+- 腾讯云 COS 私有存储，兼容已有阿里云 OSS 文件；长时间上传与数据库短事务分开，失败或替换文件由清理任务回收。
+- Redis 缓存封面字节，同一 JVM 内合并相同封面的并发回源请求；每次仍查询商品可见性或权益。
+- 上传封面生成长边最多 1920 像素、JPEG `q:v=2` 的静态图片，壁纸原文件保持原样。
 
-两次调整清单及当前字段见 [商品结构修改说明](docs/catalog-refactor-changes.md)。
+充值、修改用户名/密码、取消订单、退款和外部支付尚未开放后端接口。站内币付款会实际扣减余额，不依赖测试付款开关。
 
-## 工具链
+## 技术栈
 
-| 项目 | 配置 |
+| 技术 | 用途 |
 | --- | --- |
-| Java | 21；本机 Temurin 21.0.12.1，D:\Codex\software\jdk-21.0.12.1+1 |
-| Spring Boot | 3.5.16 |
-| Maven | Wrapper 锁定3.9.16，并配置分发包SHA-256校验 |
-| MyBatis-Plus | 3.5.17，Spring Boot 3 starter |
-| 本机依赖缓存 | D:\Codex\software\maven-repository |
-| MySQL | 127.0.0.1:3306，zlowallpaper，wallpaper_app |
-| 后端地址 | http://127.0.0.1:8080/api/v1 |
+| Java 21、Spring Boot 3.5.16 | HTTP、配置、参数校验和事务 |
+| MySQL 8、MyBatis-Plus 3.5.17 | 数据存储、Mapper XML、分页与行锁 |
+| Spring Security Crypto、JJWT | BCrypt 和 JWT |
+| Spring Data Redis、Lettuce | 封面字节缓存 |
+| 腾讯云 COS SDK、阿里云 OSS SDK | 私有文件上传、读取、签名和删除 |
+| FFprobe、FFmpeg | 媒体检查、首帧解码和封面压缩 |
+| JUnit 5、Mockito、Spring Boot Test、H2 | 自动化测试 |
 
-现有 JDK 25 保留，没有修改系统全局 JAVA_HOME。Java21与Maven下载包已经按官方校验和验证。
+未引入 Spring Security Web 过滤链；身份校验由项目的 `AuthFilter` 完成。Redis 不保存会话或购买权限。
 
-## 启动
+## 本地运行
 
-项目根目录已有 .env，应用在 local 配置中显式读取其中 MYSQL_PASSWORD 和 AUTH_JWT_SECRET。工作目录必须为项目根目录；其他环境通过进程环境变量传入。JWT密钥须为至少32个随机字节的Base64编码；真实凭证不写入源码。
+准备 JDK 21、MySQL 8、FFmpeg/FFprobe 和可访问的私有 COS 或 OSS 存储桶。Redis 用于封面加速，关闭或不可用时仍可回源。
 
-在 PowerShell 中执行：
+1. 按 [数据库初始化说明](database/README.md) 初始化空库并准备应用账号。
+2. 将 `.env.example` 复制为 `.env`，填写数据库密码、JWT 密钥及云存储配置。已有配置无需覆盖。
+3. 可选：执行 `docker compose up -d redis`，或连接自己的 Redis 实例。
+4. 在仓库根目录运行：
 
-```powershell
-Set-Location E:\zlowallpaper_sever
-.\scripts\start-backend.ps1
-```
+   ```powershell
+   .\mvnw.cmd spring-boot:run
+   ```
 
-脚本在当前终端运行服务，Ctrl+C停止。它仅为启动过程选用本机JDK21、Maven缓存目录和local环境，不修改系统变量。自定义端口使用 `-Port 8081`，自定义JDK目录使用 `-JavaHome <目录>`。
+Linux/macOS 使用 `./mvnw spring-boot:run`。IDEA 使用 JDK 21，运行 `ZloWallpaperApplication`，工作目录设为仓库根目录。
 
-浏览器或Apifox请求 `GET http://127.0.0.1:8080/api/v1/health`。MySQL就绪时：
-
-```json
-{"code":"OK","message":"","data":{},"requestId":"由服务器生成"}
-```
-
-健康接口通过应用数据源执行SELECT 1；数据库不可用返回HTTP503、SERVICE_UNAVAILABLE、data:null，不返回连接详情。当前Redis尚未纳入健康检查；后续业务依赖Redis时补充其就绪策略。
-
-## IDEA 打开方式
-
-1. 打开根目录pom.xml，选择作为Maven项目加载；已经打开此文件夹时，可右键pom.xml选择“添加为Maven项目”。
-2. Project Structure → SDKs 添加 `D:\Codex\software\jdk-21.0.12.1+1`；Project SDK选择该JDK21。Maven Importing / Runner也使用JDK21。
-3. 本机 Maven home选择 `D:\Codex\software\apache-maven-3.9.16`，Local repository选择 `D:\Codex\software\maven-repository`。命令行仍可使用项目Wrapper。
-4. 运行 `src/main/java/com/zlo/wallpaper/ZloWallpaperApplication.java` 的main方法；工作目录保持 `E:\zlowallpaper_sever`。未指定环境时默认local。
-
-现有IDEA文件夹配置此前指向JDK25；没有手动伪造IDEA全局SDK注册信息。选择新JDK后由IDEA保存正确设置。
-
-## 新增文件的用途
-
-| 文件/目录 | 用途 |
-| --- | --- |
-| pom.xml | 项目信息、依赖、Java版本、打包插件 |
-| mvnw、mvnw.cmd、.mvn/wrapper | 官方Maven Wrapper；统一构建版本，无须系统PATH里有mvn |
-| src/main/java | Java源码；com.zlo.wallpaper为根包 |
-| ZloWallpaperApplication.java | 应用入口与组件扫描起点 |
-| common/ApiResponse.java | 与现有接口一致的响应外壳 |
-| common/RequestIdFilter.java | 为请求生成requestId，写入请求属性与X-Request-Id响应头 |
-| common/HealthController.java | 基础MySQL就绪检查，无商城业务 |
-| config/WebConfig.java | 允许指定管理端来源的CORS，支持预检，不携带cookie凭证 |
-| catalog/controller、service、mapper、dto、entity、vo、model、util | 分类/商品公开查询、管理员分类管理、请求与返回对象及联表统计 |
-| src/main/resources/mapper/catalog | 商品联表、分页和详情 SQL |
-| config/MybatisPlusConfig.java | MyBatis-Plus 分页拦截器，单页上限50 |
-| auth/controller、service、mapper、dto、vo、entity | 五个认证接口及账号、会话实体 |
-| auth/filter/AuthFilter.java、common/BaseContext.java | 统一身份/管理员校验与当前请求用户ID |
-| auth/util、config/AuthProperties.java、config/PasswordConfig.java | JWT、随机令牌、密码组件和有效期配置 |
-| auth/task/SessionCleanupTask.java | 定期清理已过期且超过保留期的会话轮换链 |
-| database/002-create-sessions.sql | 在原有七张表基础上新增sessions，已经在本机执行 |
-| common/GlobalExceptionHandler.java | 参数和业务异常转换为统一错误响应 |
-| 其他业务模块的package-info.java | 说明模块职责，后续添加实现 |
-| src/main/resources/application.yml | 端口、API前缀、通用配置、MyBatis映射等 |
-| src/main/resources/application-local.yml | 本机数据库、Redis连接参数、显式.env导入和预留开发配置 |
-| src/test | 自动测试；使用test环境，不读取商城密码或改商城表 |
-| target | 构建输出与测试报告，已被Git忽略 |
-
-文件存储目录用于临时文件、清理队列及遗留本地封面；管理员素材上传和原文件授权下载已接入私有COS，兼容OSS旧位置。服务仅绑定127.0.0.1，本阶段用于本机开发。
-
-数据库初始化设置为never；不会在启动时重复执行database中的建表SQL，也不会重建现有六张业务表。启动不会插入管理员、分类或商品。
-
-## 商品管理本次完成
-
-管理员商品列表、一次multipart创建、部分修改、上下架四接口已实现，另有管理员封面预览。新建默认草稿，编辑保持发布状态；文件检查与OSS传输在短数据库事务之外，失败或替换对象有引用保护及持久清理重试。
-
-工作台已接入新协议，选文件不上传，点击保存才提交。无需新建表；沿用已执行的004迁移后的43字段wallpapers。旧独立上传入口已删除。开发与代码导读见 [catalog-development3](docs/catalog-development3.md)，剩余事项见 [接口核对](docs/frontend-backend-compatibility.md)。重启后端、刷新工作台后生效。
-
-## 商品模块查询接口
-
-| 方法 / 路径（接在 /api/v1 后） | 功能 |
-| --- | --- |
-| GET /categories | 返回全部启用分类的 id/name |
-| GET /wallpapers | page/pageSize/keyword/categoryId 查询已上架商品 |
-| GET /wallpapers/{id} | 已上架商品详情，草稿和下架商品返回404 |
-
-列表默认第1页、每页12条，上限50条。keyword不传、为空或只含空白时不按标题筛选；categoryId不传或为空时不按分类筛选。排序为published_at降序、id降序。分类停用不下架商品。返回字段严格按 `docs/frintend-docks/openapi.yaml`，ID/字节数为字符串；sha256 为当前原文件哈希，不返回资源版本。
-
-商品coverUrl指向只读辅助入口 `GET /api/v1/catalog/covers/{id}`（id 是商品 ID），仅允许读取已上架商品行中的READY封面，不能用于读取原文件或草稿封面。支持LOCAL和OSS，最大4 MiB；LOCAL文件位于wallpaper.storage.root下，OSS从商品封面字段中的私有Bucket读取。缺少文件返回404，云存储不可用返回503。
-
-详细代码导读、Apifox请求与测试说明见 [catalog开发说明](docs/catalog-development.md)。
-
-管理员分类管理已实现：GET/POST `/admin/categories`、PATCH/DELETE `/admin/categories/{id}`，要求当前ADMIN角色。支持分类新增、改名、排序、启停和无商品引用时删除；引用数统计所有商品状态，停用不下架已有商品。逐文件导读、SQL示例和验收见 [catalog第二阶段开发说明](E:/zlowallpaper_sever/docs/catalog-development2.md)。
-
-旧独立 POST `/admin/uploads` 已删除（2026-10-15），不再保留410提示路由。文件随商品创建/修改的multipart请求一起提交；内部 FileUploadService、MediaInspector、OssStorage 继续负责媒体检查和OSS上传，失败文件由清理服务回收。封面上限4 MiB，原文件10 GiB。
+默认地址为 `http://127.0.0.1:8080/api/v1`。`GET /health` 只检查 MySQL，不代表 Redis、云存储和媒体工具全部就绪。配置细节见 [开发环境](docs/development-environment.md)。默认仅监听回环地址，面向本地开发。
 
 ## 构建与测试
 
-认证接口：POST `/auth/register`、`/auth/login`、`/auth/refresh`、`/auth/logout`，GET `/me`。注册后需要登录，私有请求使用Bearer访问令牌。登录状态保存在MySQL，刷新令牌轮换和登出会使旧凭证失效；auth不依赖Redis。请求示例、会话字段、事务导读见 [auth开发与Apifox联调说明](docs/auth-development.md)。
-
 ```powershell
-Set-Location E:\zlowallpaper_sever
-$env:JAVA_HOME = 'D:\Codex\software\jdk-21.0.12.1+1'
-$env:MAVEN_USER_HOME = 'D:\Codex\software\maven-user-home'
-.\mvnw.cmd -B -ntp -Dmaven.repo.local=D:/Codex/software/maven-repository verify
+.\mvnw.cmd test
+.\mvnw.cmd package
 ```
 
-生成 `target/zlowallpaper-server-0.0.1-SNAPSHOT.jar`。默认153项测试：21项auth、34项catalog公开查询、58项管理员分类、15项内部上传、2项旧上传停用、12项媒体签名、8项OSS存储和3项健康/CORS检查，默认不读取或修改本机商城库，也不访问真实OSS。另有显式开启的MySQL验证及13项真实媒体工具验证，命令见对应模块说明。
+默认测试使用隔离的 H2 数据库和云存储替身，不访问真实商城库或云端文件。真实媒体工具及 MySQL 专项须显式开启，见 [测试说明](docs/integration-testing.md)。
 
-## 后续开发
+## 代码与文档入口
 
-六个业务包为auth、catalog、order、payment、entitlement、download。catalog 包含公开查询、分类及商品管理、媒体检查与 OSS 存储。POST /orders 已实现，免费订单与权益事务提交，收费订单保存PENDING；详见 [创建订单开发说明](docs/order-development.md)。数据库已执行007余额迁移，当前六张表；初始化新库须按001、002、003、004、006、007顺序执行，已有库只补缺少的增量迁移。壁纸币付款 POST /orders/{id}/pay 已实现，同一事务扣余额、更新PAID/COIN并新增权益，重复付款不重复扣币；不再使用测试开关，详见 [壁纸币付款开发说明](docs/order-payment-development.md)。GET /me/orders订单列表已实现，返回本账号订单快照，详见 [订单查询开发说明](docs/order-query-development.md)。GET /me/wallpapers已购查询与5分钟OSS下载授权已实现，详见[已购与下载开发说明](docs/download-development.md)；两端前端已完成本轮适配与真实联调。
+```text
+src/main/java/com/zlo/wallpaper/
+  auth/          账号、令牌、会话和用户查询
+  catalog/       分类、商品、封面、上传和存储适配
+  order/         下单、余额付款和订单查询
+  entitlement/   购买权益数据访问
+  download/      原文件下载授权
+  common/        响应、异常、请求上下文和过滤器
+  config/        分页、缓存、存储和媒体工具配置
+src/main/resources/mapper/   Mapper XML
+src/test/                    正式自动化测试
+database/                    初始化和增量 SQL
+docs/                        当前设计与接口说明
+scripts/                     本地启动和数据库辅助命令
+```
 
-Redis已加入连接依赖和本机参数，但尚未验证服务可用性。会话采用MySQL sessions表；上传使用私有OSS；创建订单无需请求键，通过当前权益、待付款订单、行锁和唯一约束处理重复购买；权益仅保存有效记录。商品保存失败及替换文件已有持久清理任务；壁纸币付款通过账号锁及SQL余额条件避免重复扣款和透支，将来异步媒体处理后续设计。
+建议先看 [文档索引](docs/README.md)：
 
-设计文档位于docs；数据库SQL位于database；当前前端接口依据为docs/frintend-docks/openapi.yaml。
+- [接口调用链与技术说明](docs/api-call-chains.md)：公共组件、25 个接口的顺序、SQL 和事务边界。
+- [OpenAPI](docs/api/openapi.yaml)：导入 Apifox 的请求和响应契约。
+- [数据模型](docs/data-model.md)、[封面缓存](docs/cover-cache-development.md)、[封面压缩](docs/cover-compression-development.md)。
 
-官方参考：[Spring Boot 3.5要求](https://docs.spring.io/spring-boot/3.5/system-requirements.html)、[MyBatis-Plus安装](https://baomidou.com/getting-started/install/)、[Spring配置导入](https://docs.spring.io/spring-boot/3.5/reference/features/external-config.html)、[Maven Wrapper](https://maven.apache.org/tools/wrapper/)。
+完整业务顺序尽量保留在入口 Service 方法中。并发变化要求的第二次检查标明“并发复查”，便于沿一条业务链阅读。
 
-用户余额users.balance_cents默认0；100单位=1壁纸币，当前商品币种ZLC。GET /me和登录/刷新用户资料新增字符串balanceCents；设置测试余额见database/dev-set-coin-balance.sql（仅供手动开发测试，未自动赠币）。OpenAPI已同步；两端界面与付款客户端改造按用户安排后续统一处理。
+本仓库只包含后端。[前端仓库](https://github.com/zzzzzzzlo/zlowallpaper) 包含网页、客户端和工作台。本机凭据、截图、素材及一次性实验产物不提交。
