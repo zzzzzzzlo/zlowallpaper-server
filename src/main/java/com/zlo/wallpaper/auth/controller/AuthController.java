@@ -53,7 +53,7 @@ public class AuthController {
     }
 
     /**
-     * 接收刷新令牌JSON并返回轮换后的会话响应。
+     * 接收刷新令牌JSON并返回同会话重新签发的访问令牌与原刷新令牌。
      * 框架调用位置：Spring MVC根据方法路由注解处理前端HTTP请求。
      *
      * @param dto 本次请求绑定并经过校验的DTO资料

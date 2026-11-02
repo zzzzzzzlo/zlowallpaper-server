@@ -24,9 +24,11 @@ src/test 是项目正式自动化测试，随业务维护。一次性压测、�
 
 ## MySQL专项
 
-*MySqlIT.java 通过 wallpaper.mysql.tests 系统属性显式开启，使用专门准备的数据库。默认Maven测试不会自动运行这些专项。
+*MySqlIT.java 通过各测试类的系统属性显式开启。认证使用auth.mysql.tests，分类使用category.mysql.tests，公开目录使用catalog.mysql.tests，管理员商品/订单使用wallpaper.mysql.tests。默认Maven测试不会自动运行这些专项。
 
 运行前阅读各测试类的连接、清理及数据隔离设置。它们不能视为对任意业务库都安全的通用命令，不应直接把开发商城数据库当作隔离测试库。真实云下载相关测试还有单独开关。
+
+认证专项命令为 `./mvnw.cmd '-Dtest=AuthMySqlIT' '-Dauth.mysql.tests=true' test`。它自行创建唯一前缀的临时用户，结束后仅清理自己的用户/会话。覆盖固定令牌重复刷新、两次并发刷新共享一条会话，以及登出与刷新竞争后不留下有效会话。运行前先完成009会话表迁移。
 
 ## 接口与前端联调
 

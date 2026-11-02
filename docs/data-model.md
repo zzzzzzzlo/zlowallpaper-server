@@ -9,13 +9,15 @@
 | 表 | 主要字段 | 业务作用 |
 | --- | --- | --- |
 | users | id、username、password_hash、role、status、balance_cents | 用户身份、密码哈希、当前角色/状态及站内币余额 |
-| sessions | id、user_id、family_id、refresh_token_hash、expires_at、revoked_at | 刷新令牌轮换、登出、过期与重放撤销 |
+| sessions | id、user_id、refresh_token_hash、created_at、expires_at、revoked_at | 每次登录一条记录，固定刷新令牌、登出与过期 |
 
 用户在订单、权益和会话中的关联均使用稳定的users.id，不用用户名作为外键。用户名唯一；显示名称字段已经移除。UserVO只公开id、username、balanceCents。
 
 注册固定创建USER，管理员为ADMIN；状态为ACTIVE或DISABLED。每次认证核对当前账号状态与会话，不只验证JWT签名。数据库存密码哈希和刷新令牌哈希，不存明文密码或刷新令牌。
 
 余额用BIGINT/Long保存整数最小单位，100单位=1枚壁纸币，新用户为0。JSON中的余额为字符串，避免客户端整数精度问题。修改用户名/密码、充值还没有后端接口。
+
+同一次登录的刷新只重新签发 accessToken，session ID、refreshToken、expires_at 保持不变。无 family_id、轮换历史或重放撤销。登出按令牌哈希原子更新 revoked_at，其他登录互不影响。旧库执行009迁移，保留全部会话ID、哈希、日期与撤销状态。
 
 ## 分类与商品
 

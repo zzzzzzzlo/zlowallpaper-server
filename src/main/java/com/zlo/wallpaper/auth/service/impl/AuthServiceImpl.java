@@ -31,7 +31,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 /**
- * 实现密码校验、会话持久化、令牌签发与轮换；刷新重放时保留撤销结果。
+ * 实现密码校验、独立登录会话、访问令牌刷新与当前会话撤销。
  * 创建方式：Spring组件扫描创建并管理；不需要业务代码手动new。
  * 注入位置：AdminCategoryIntegrationTest.authService、AdminWallpaperIntegrationTest.auth、AuthController.authService、AuthFilter.authService、AuthIntegrationTest.authService、AuthMySqlIT.authService、OrderIntegrationTest.authService。
  */
@@ -106,66 +106,47 @@ public class AuthServiceImpl implements AuthService {
         }
         String refreshToken = tokenGenerator.generateRefreshToken();
         LocalDateTime createdAt = now();
-        Session session = createSession(user.getId(), UUID.randomUUID().toString(), refreshToken,
+        Session session = createSession(user.getId(), refreshToken,
                 createdAt, createdAt.plusDays(properties.getSessionDays()));
         return sessionVO(user, session, refreshToken, createdAt);
     }
 
     /**
-     * 核对刷新令牌、轮换会话并返回新令牌；发现重放时撤销对应登录组。
-     * 调用/引用位置：AuthController.refresh、AuthIntegrationTest.concurrentRefresh、AuthMySqlIT.refreshTogether、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 核对固定刷新令牌和当前会话，重新签发访问令牌，不更新会话或轮换刷新令牌。
+     * 调用/引用位置：AuthController.refresh、AuthIntegrationTest.concurrentRefresh、AuthMySqlIT.refreshTogether、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      *
-     * @param refreshToken 客户端持有的明文刷新令牌，用于轮换或撤销其所属登录组，不记录到日志
+     * @param refreshToken 客户端持有的明文刷新令牌，用于刷新或撤销当前登录，不记录到日志
      * @return 新accessToken、refreshToken、实际有效秒数expiresIn及公开UserVO
      */
     @Override
-    @Transactional(noRollbackFor = BusinessException.class)
     public SessionVO refresh(String refreshToken) {
-        Session session = lockSession(refreshToken);
+        Session session = sessionMapper.selectByRefreshHash(tokenGenerator.hash(refreshToken));
         LocalDateTime currentTime = now();
-        if (session == null || !session.getExpiresAt().isAfter(currentTime)) { throw expired(); }
-        if (session.getRevokedAt() != null) {
-            if ("ROTATED".equals(session.getRevokeReason())) {
-                // 旧令牌再次使用：撤销整组，而不是只拒绝这一条记录。
-                // noRollbackFor 保证返回401时，这次撤销仍然提交。
-                sessionMapper.revokeFamily(session.getFamilyId(), "REPLAY", currentTime);
-            }
-            throw expired();
-        }
+        if (session == null || session.getRevokedAt() != null || !session.getExpiresAt().isAfter(currentTime)) { throw expired(); }
         User user = userMapper.selectById(session.getUserId());
-        if (user == null || !"ACTIVE".equals(user.getStatus())) {
-            sessionMapper.revokeFamily(session.getFamilyId(), "DISABLED", currentTime);
-            throw expired();
-        }
-        // SessionVO 要求 expiresIn 至少60秒，整组截止时间不会无限往后延。
+        if (user == null || !"ACTIVE".equals(user.getStatus())) { throw expired(); }
+        // SessionVO要求至少60秒；刷新不延长这次登录的固定截止时间。
         if (Duration.between(currentTime, session.getExpiresAt()).getSeconds() < 60) { throw expired(); }
-        String nextToken = tokenGenerator.generateRefreshToken();
-        Session next = createSession(user.getId(), session.getFamilyId(), nextToken,
-                currentTime, session.getExpiresAt());
-        if (sessionMapper.markRotated(session.getId(), next.getId(), currentTime) != 1) {
-            throw new IllegalStateException("会话轮换状态不一致");
-        }
-        return sessionVO(user, next, nextToken, currentTime);
+        // 刷新只读、不新增或恢复会话。若此时并发登出，authenticate仍会查到撤销并拒绝该JWT。
+        return sessionVO(user, session, refreshToken, currentTime);
     }
 
     /**
-     * 撤销刷新令牌所属登录组，使该组访问令牌也不能继续使用。
-     * 调用/引用位置：AuthController.logout、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 原子撤销当前登录，令该会话的全部访问令牌失效，不影响其他登录。
+     * 调用/引用位置：AuthController.logout、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
-     * @param refreshToken 客户端持有的明文刷新令牌，用于轮换或撤销其所属登录组，不记录到日志
+     * @param refreshToken 客户端持有的明文刷新令牌，用于刷新或撤销当前登录，不记录到日志
      */
     @Override
-    @Transactional
     public void logout(String refreshToken) {
-        Session session = lockSession(refreshToken);
-        // 重复登出和未知令牌均返回空对象，调用方可以安全重试。
-        if (session != null) { sessionMapper.revokeFamily(session.getFamilyId(), "LOGOUT", now()); }
+        // 单条条件UPDATE即可；重复登出、未知令牌不更新记录，仍返回成功。
+        sessionMapper.revokeByRefreshHash(tokenGenerator.hash(refreshToken), now());
     }
 
     /**
      * 验证访问JWT并核对数据库会话、用户归属和当前账号状态。
-     * 调用/引用位置：AuthFilter.doFilterInternal、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 调用/引用位置：AuthFilter.doFilterInternal、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      *
      * @param accessToken Authorization携带的访问JWT，需要验证签名并核对会话和用户
      * @return 上述处理得到的User结果；业务校验失败时通过异常返回错误
@@ -185,37 +166,19 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * 定位刷新令牌的会话，取得组锁后重新读取并锁住该会话。
-     * 调用/引用位置：AuthServiceImpl.logout、AuthServiceImpl.refresh。
-     *
-     * @param token 刷新令牌或访问令牌字符串，按当前方法用途处理且不得写入日志
-     * @return 上述处理得到的Session结果；业务校验失败时通过异常返回错误
-     */
-    private Session lockSession(String token) {
-        String hash = tokenGenerator.hash(token);
-        Session found = sessionMapper.selectByRefreshHash(hash);
-        if (found == null) { return null; }
-        if (sessionMapper.lockFamily(found.getFamilyId()) == null) { return null; }
-        // FOR UPDATE 重新读取，避免MySQL可重复读拿到并发轮换前的旧快照。
-        return sessionMapper.selectByRefreshHashForUpdate(hash);
-    }
-
-    /**
      * 保存新会话记录，只存刷新令牌哈希并回填会话ID。
-     * 调用/引用位置：AuthServiceImpl.login、AuthServiceImpl.refresh。
+     * 调用/引用位置：AuthServiceImpl.login。
      *
      * @param userId 当前可信用户的数据库ID
-     * @param familyId 一次独立登录的固定组标识
      * @param token 刷新令牌或访问令牌字符串，按当前方法用途处理且不得写入日志
      * @param createdAt 记录的UTC创建时间
-     * @param expiresAt 登录组或记录的固定UTC截止时间
+     * @param expiresAt 当前会话的固定UTC截止时间
      * @return 上述处理得到的Session结果；业务校验失败时通过异常返回错误
      */
-    private Session createSession(long userId, String familyId, String token,
+    private Session createSession(long userId, String token,
                                   LocalDateTime createdAt, LocalDateTime expiresAt) {
         Session session = new Session();
         session.setUserId(userId);
-        session.setFamilyId(familyId);
         session.setRefreshTokenHash(tokenGenerator.hash(token));
         session.setCreatedAt(createdAt);
         session.setExpiresAt(expiresAt);
@@ -224,7 +187,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * 将用户与会话转成登录响应，访问期限不超过整组会话剩余时间。
+     * 将用户与会话转成登录响应，访问期限不超过当前会话剩余时间。
      * 调用/引用位置：AuthServiceImpl.login、AuthServiceImpl.refresh。
      *
      * @param user 已查询或校验的用户实体

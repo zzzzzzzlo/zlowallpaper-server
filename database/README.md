@@ -14,6 +14,7 @@ SOURCE database/004-inline-wallpaper-files.sql;
 SOURCE database/006-simplify-order-entitlements.sql;
 SOURCE database/007-user-coin-balance.sql;
 SOURCE database/008-remove-user-display-name.sql;
+SOURCE database/009-simplify-sessions.sql;
 ```
 
 编号保留真实变更顺序，没有005不表示遗漏必须执行的脚本。早期文件包含过渡结构，后续脚本迁移到当前模型，不能只执行001。
@@ -21,6 +22,10 @@ SOURCE database/008-remove-user-display-name.sql;
 最终六张表为 users、sessions、categories、wallpapers、orders、entitlements。商品 original_* 和 cover_* 保存当前文件元数据，没有独立资产表或资源历史表。
 
 应用不会启动时自动执行这些脚本、重建表或创建管理员。旧库只执行缺少的增量；不要从001重跑。MySQL DDL 不能当作可回滚的普通业务事务。
+
+## 会话简化迁移
+
+旧库先备份 sessions，然后执行009。迁移保留id、user_id、refresh_token_hash、created_at、expires_at和revoked_at，只删除family_id、revoke_reason、replaced_by_id及其约束/索引。旧已撤销记录不会重新激活；现有有效登录保留ID和期限。009可重复执行，新库执行时不改变002已创建的简化结构。部署时停止旧版后端，迁移后再启动新版，避免旧代码继续写入已删除的列。
 
 ## 开发账号和余额
 

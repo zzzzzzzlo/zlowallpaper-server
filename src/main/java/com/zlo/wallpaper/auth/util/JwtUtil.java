@@ -48,7 +48,7 @@ public class JwtUtil {
 
     /**
      * 把可信用户ID、会话ID、签发时间及有效秒数签名为访问JWT。
-     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthServiceImpl.sessionVO。
+     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.expiredAccessCanRefreshAndLogoutTheSession、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthServiceImpl.sessionVO。
      *
      * @param userId 当前可信用户的数据库ID
      * @param sessionId JWT或数据库记录所对应的会话ID

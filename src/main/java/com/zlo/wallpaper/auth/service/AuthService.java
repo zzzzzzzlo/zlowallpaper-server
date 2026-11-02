@@ -29,24 +29,24 @@ public interface AuthService {
      */
     SessionVO login(LoginDTO dto);
     /**
-     * 核对刷新令牌、轮换会话并返回新令牌；发现重放时撤销对应登录组。
-     * 调用/引用位置：AuthController.refresh、AuthIntegrationTest.concurrentRefresh、AuthMySqlIT.refreshTogether、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 核对固定刷新令牌与会话，重新签发访问令牌，保留当前会话和刷新令牌。
+     * 调用/引用位置：AuthController.refresh、AuthIntegrationTest.concurrentRefresh、AuthMySqlIT.refreshTogether、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      *
-     * @param refreshToken 客户端持有的明文刷新令牌，用于轮换或撤销其所属登录组，不记录到日志
+     * @param refreshToken 客户端持有的明文刷新令牌，用于刷新或撤销当前登录，不记录到日志
      * @return 新accessToken、refreshToken、实际有效秒数expiresIn及公开UserVO
      */
     SessionVO refresh(String refreshToken);
     /**
-     * 撤销刷新令牌所属登录组，使该组访问令牌也不能继续使用。
-     * 调用/引用位置：AuthController.logout、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 撤销刷新令牌对应的独立登录，使该会话的访问令牌失效。
+     * 调用/引用位置：AuthController.logout、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
-     * @param refreshToken 客户端持有的明文刷新令牌，用于轮换或撤销其所属登录组，不记录到日志
+     * @param refreshToken 客户端持有的明文刷新令牌，用于刷新或撤销当前登录，不记录到日志
      */
     void logout(String refreshToken);
     /**
      * 验证访问JWT并核对数据库会话、用户归属和当前账号状态。
-     * 调用/引用位置：AuthFilter.doFilterInternal、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 调用/引用位置：AuthFilter.doFilterInternal、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      *
      * @param accessToken Authorization携带的访问JWT，需要验证签名并核对会话和用户
      * @return 上述处理得到的User结果；业务校验失败时通过异常返回错误

@@ -51,7 +51,8 @@ paths:
     post:
       operationId: refreshSession
       tags: [Auth]
-      summary: 刷新并轮换 refreshToken；过期/撤销返回 401
+      summary: 复用当前会话签发 accessToken；过期/撤销返回 401
+      description: 同次登录的refreshToken保持不变，可重复刷新；不新增会话或延长固定有效期。旧accessToken在自身到期或会话撤销时失效。
       requestBody: { $ref: '#/components/requestBodies/RefreshToken' }
       responses:
         '200': { $ref: '#/components/responses/Session' }
@@ -60,7 +61,8 @@ paths:
     post:
       operationId: logout
       tags: [Auth]
-      summary: 撤销当前会话；不要求有效 accessToken
+      summary: 撤销当前独立登录；不要求有效 accessToken
+      description: 当前会话的新旧accessToken全部失效，其他登录不受影响。重复登出或未知refreshToken均返回成功空对象。
       requestBody: { $ref: '#/components/requestBodies/RefreshToken' }
       responses:
         '200': { $ref: '#/components/responses/Empty' }
@@ -627,7 +629,7 @@ components:
       properties:
         accessToken: { type: string, minLength: 1 }
         refreshToken: { type: string, minLength: 1 }
-        expiresIn: { type: integer, minimum: 60, maximum: 691200, example: 691200, description: 默认8天；不超过整组会话剩余期限 }
+        expiresIn: { type: integer, minimum: 60, maximum: 691200, example: 691200, description: 默认8天；不超过当前会话剩余期限 }
         user: { $ref: '#/components/schemas/User' }
     Category:
       type: object

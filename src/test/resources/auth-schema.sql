@@ -13,15 +13,9 @@ CREATE TABLE users (
 CREATE TABLE sessions (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
-    family_id CHAR(36) NOT NULL,
     refresh_token_hash CHAR(64) NOT NULL UNIQUE,
     created_at TIMESTAMP(3) NOT NULL,
     expires_at TIMESTAMP(3) NOT NULL CHECK(expires_at > created_at),
-    revoked_at TIMESTAMP(3),
-    revoke_reason VARCHAR(16),
-    replaced_by_id BIGINT UNIQUE,
-    CHECK((revoked_at IS NULL AND revoke_reason IS NULL AND replaced_by_id IS NULL)
-        OR (revoked_at IS NOT NULL AND revoke_reason IS NOT NULL
-            AND revoke_reason IN ('ROTATED','LOGOUT','REPLAY','DISABLED')))
+    revoked_at TIMESTAMP(3)
 );
-CREATE INDEX idx_sessions_family_id ON sessions(family_id,id);
+CREATE INDEX idx_sessions_user_id ON sessions(user_id,expires_at);

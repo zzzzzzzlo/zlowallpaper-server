@@ -1,6 +1,6 @@
 # ZloWallpaper：接口调用链与技术说明
 
-核对日期：2026-10-22。以当前Controller、Service、Mapper XML与配置为依据，统一前缀为/api/v1，下文省略此前缀。本文覆盖25个已实现后端HTTP接口，公共封面辅助入口也在文中说明。
+核对日期：2026-11-02。以当前Controller、Service、Mapper XML与配置为依据，统一前缀为/api/v1，下文省略此前缀。本文覆盖25个已实现后端HTTP接口，公共封面辅助入口也在文中说明。
 
 先看公共调用类，再按接口阅读执行顺序、SQL、事务和技术。接口完整字段见[OpenAPI](api/openapi.yaml)，文件存储见[存储说明](storage.md)。后端不包含网页或Qt源码；这些客户端调用同一套接口。
 
@@ -56,13 +56,13 @@
 | [JwtUtil][jwt-util] | 使用 JJWT 签发/解析 HS256 accessToken。JWT 的 sub 是用户 ID，sid 是会话 ID；校验 issuer、kind、算法和期限。AuthServiceImpl 调用 |
 | [TokenGenerator][token-generator] | `SecureRandom` 生成 32 随机字节的 refreshToken，Base64URL 编码；`hash` 用 SHA-256。数据库只存刷新令牌哈希，登录/刷新/登出调用 |
 | [PasswordConfig][password-config] | 提供 `Pbkdf2PasswordEncoder.defaultsForSpringSecurity_v5_8()` 与 UTC `Clock`；启用定时调度和认证配置绑定。密码哈希使用 PBKDF2，令牌哈希使用 SHA-256，两者用途不同 |
-| [AuthProperties][auth-properties] | 读取 `wallpaper.auth`。当前 accessToken 配置 691200 秒，即 8 天；会话组上限 30 天；实际签发还受会话剩余期限限制 |
+| [AuthProperties][auth-properties] | 读取 `wallpaper.auth`。当前 accessToken 配置 691200 秒，即 8 天；单次登录会话上限 30 天；实际签发还受会话剩余期限限制 |
 | [CredentialsDTO][credentials-dto]、[StrictStringDeserializer][strict-string] | 注册/登录 DTO 共用用户名和密码规则；Jackson 严格要求字符串。`@Valid` 触发 Jakarta Bean Validation；不是数据库查询 |
 | [CatalogIds][catalog-ids] | `validatePathId` 检查外部 ID 格式，`findDatabaseId` 把字符串转为可用数据库 Long；它不查询数据库。商品、分类、订单、封面、下载复用 |
 | [CategoryNames][category-names]、[CategoryFieldDeserializers][category-deserializers] | 分类名称规范化，以及分类 JSON 字段严格解析；供分类 DTO / Service 使用 |
 | [MybatisPlusConfig][pagination-config] | 注册 `MybatisPlusInterceptor → PaginationInnerInterceptor(DbType.MYSQL)`；最大每页 50，overflow=false。MyBatis 运行 Mapper SQL 时插件补分页/COUNT |
 | Spring IoC、`@Service/@Component/@Mapper/@Autowired` | Spring 创建并注入业务对象；MyBatis 为 Mapper 接口生成代理。Controller 依赖 Service 接口，运行时进入它的 Impl；业务代码不需要逐层 new |
-| Spring 事务代理 | 跨 Spring Bean 调用 `@Transactional` 方法时进入事务代理。调用结束提交，运行时异常通常回滚；刷新会话有明确的 `noRollbackFor` 例外 |
+| Spring 事务代理 | 跨 Spring Bean 调用 `@Transactional` 方法时进入事务代理。调用结束提交，运行时异常通常回滚；刷新会话只读，不开启业务事务，登出使用单条条件 UPDATE |
 
 普通 JSON 由 `@RequestBody` + Jackson 绑定；查询参数和 multipart 资料由 `@ModelAttribute` 绑定。商品 multipart 的 `configureBinding` 是 Spring 在绑定阶段调用的 `@InitBinder` 回调，之后接口方法才调用 `checkForm`；不是 Service 手动再去执行一套绑定。
 
@@ -116,7 +116,7 @@
 | JSqlParser | 5.2，经 MP 分页解析依赖引入 | 分页 COUNT SQL 解析与改写；不是业务 JOIN 的执行引擎 |
 | MySQL / InnoDB | 本地关系数据库；驱动 Connector/J 9.7.0 | 六张业务表、事务、`FOR UPDATE` 行锁、唯一约束、外键；驱动版本不等于 MySQL 服务端版本 |
 | HikariCP | 6.3.3 | 数据库连接池；local 配置最大 10 连接 |
-| Spring Transaction / spring-tx | 6.2.19 | `@Transactional`，下单、付款、分类写操作、会话轮换、商品短事务 |
+| Spring Transaction / spring-tx | 6.2.19 | `@Transactional`，下单、付款、分类写操作、注册/登录、商品短事务 |
 | 阿里云 OSS Java SDK | aliyun-sdk-oss 3.18.4，V1 风格 | OSS V4 签名、上传、分片、读封面、预签名下载、删除；不是 AWS SDK |
 | 腾讯云 COS Java SDK | cos_api 5.6.227 | COS HTTPS 上传、顺序分片、封面读取、下载签名和删除；CosProperties 绑定桶、地域、密钥，SDK 自动生成域名 |
 | Spring Data Redis / Lettuce | spring-data-redis 3.5.13；lettuce-core 6.6.0.RELEASE；starter 3.5.16 | CoverCacheService + RedisConfig；通过 RedisTemplate 读写二进制图片，SET 同时设置 6 小时 TTL；未使用 Spring Cache 注解或 Redis 订单锁 |
@@ -142,8 +142,8 @@
 | --- | --- | --- | --- |
 | [01](#01.%20%E6%B3%A8%E5%86%8C%EF%BC%9APOST%20%2Fauth%2Fregister) | POST `/auth/register` | 公开 | 注册普通用户 |
 | [02](#02.%20%E7%99%BB%E5%BD%95%EF%BC%9APOST%20%2Fauth%2Flogin) | POST `/auth/login` | 公开 | 密码登录并建立会话 |
-| [03](#03.%20%E5%88%B7%E6%96%B0%EF%BC%9APOST%20%2Fauth%2Frefresh) | POST `/auth/refresh` | 公开，验证 refreshToken | 轮换登录令牌 |
-| [04](#04.%20%E7%99%BB%E5%87%BA%EF%BC%9APOST%20%2Fauth%2Flogout) | POST `/auth/logout` | 公开，提交 refreshToken | 撤销本次登录组 |
+| [03](#03.%20%E5%88%B7%E6%96%B0%EF%BC%9APOST%20%2Fauth%2Frefresh) | POST `/auth/refresh` | 公开，验证 refreshToken | 复用会话并签发访问令牌 |
+| [04](#04.%20%E7%99%BB%E5%87%BA%EF%BC%9APOST%20%2Fauth%2Flogout) | POST `/auth/logout` | 公开，提交 refreshToken | 撤销本次登录会话 |
 | [05](#05.%20%E5%BD%93%E5%89%8D%E7%94%A8%E6%88%B7%EF%BC%9AGET%20%2Fme) | GET `/me` | 登录 | 当前用户和余额 |
 | [06](#06.%20%E5%90%AF%E7%94%A8%E5%88%86%E7%B1%BB%EF%BC%9AGET%20%2Fcategories) | GET `/categories` | 公开 | 启用分类 |
 | [07](#07.%20%E5%95%86%E5%9F%8E%E5%88%86%E9%A1%B5%EF%BC%9AGET%20%2Fwallpapers) | GET `/wallpapers` | 公开 | 上架商品分页 |
@@ -200,36 +200,33 @@ AuthController.login
   → ApiResponse.success(SessionVO)
 ```
 
-SQL：读取 users、插入 sessions。账号不存在时仍用预生成 dummyPasswordHash 做一次密码比较；不存在、密码错误、账号不可用统一返回 401 INVALID_CREDENTIALS。每次独立登录生成新的 familyId；没有“登录新设备自动踢掉其他组”的业务。sessions 只保存 refreshToken 哈希。
+SQL：读取 users、插入 sessions。账号不存在时仍用预生成 dummyPasswordHash 做一次密码比较；不存在、密码错误、账号不可用统一返回 401 INVALID_CREDENTIALS。每次独立登录新增一条 session；并发登录互不影响。sessions 只保存 refreshToken 哈希。同一次登录始终使用同一条会话与同一个 refreshToken，固定截止时间不因刷新延长。
 
-实际 accessToken 期限=min(配置 8 天，会话组剩余时间)。user 仅含字符串 id、username、字符串 balanceCents；已删除 displayName。
+实际 accessToken 期限=min(配置 8 天，当前会话剩余时间)。user 仅含字符串 id、username、字符串 balanceCents；已删除 displayName。
 
 技术：PBKDF2、SecureRandom、SHA-256、JJWT、事务与自增主键回填。源码：[Controller][auth-controller] / [实现][auth-service] / [会话 SQL][session-xml]。
 
 ### 03. 刷新：POST /auth/refresh
 
-输入：JSON `RefreshTokenDTO {refreshToken}`；200 返回新 SessionVO，失败通常为 401 SESSION_EXPIRED。
+输入：JSON `RefreshTokenDTO {refreshToken}`；200 返回 `SessionVO`，字段结构不变。响应保留原 refreshToken，仅重新签发 accessToken；失败为 401 SESSION_EXPIRED。
 
 ```text
 AuthController.refresh
-  → AuthService.refresh → AuthServiceImpl.refresh [事务，BusinessException 不回滚]
-      → lockSession
-          → TokenGenerator.hash
-          → SessionMapper.selectByRefreshHash
-          → SessionMapper.lockFamily：锁同组最早一条会话
-          → SessionMapper.selectByRefreshHashForUpdate：并发复查最新会话
-      → 检查过期、撤销、用户 ACTIVE、组剩余时间
-      → TokenGenerator.generateRefreshToken
-      → createSession：同 familyId、同固定截止时间
-      → SessionMapper.markRotated：旧会话标 ROTATED 并关联新会话
-      → sessionVO → 新 JWT 与 refreshToken
+  → AuthService.refresh → AuthServiceImpl.refresh [只读，无业务事务]
+      → TokenGenerator.hash：计算刷新令牌哈希
+      → SessionMapper.selectByRefreshHash：定位当前登录
+      → 检查会话未撤销、未过期
+      → UserMapper.selectById：检查用户 ACTIVE
+      → 检查会话剩余时间至少 60 秒
+      → sessionVO：同 session.id 签发 JWT，返回原 refreshToken
+  → ApiResponse.success
 ```
 
-SQL：查询/锁定 sessions，读取 users，插入新 sessions，更新旧 sessions；发现旧 ROTATED 令牌重放时 `revokeFamily(...,"REPLAY",...)`，用户失效时 `revokeFamily(...,"DISABLED",...)`。
+SQL：普通查询 sessions、users，不插入或更新会话，不使用 FOR UPDATE。刷新不使旧 accessToken 立即失效，旧令牌在自身到期或会话撤销时失效。账号禁用期间访问和刷新均拒绝；恢复 ACTIVE 后，未过期且未撤销的会话仍可使用。
 
-**并发重点：** 刷新与登出共用组锁，拿到锁后再 FOR UPDATE 读取令牌记录，避免普通快照读看见轮换前状态。`noRollbackFor=BusinessException.class` 使“撤销整组后抛 401”仍提交撤销，不能为了统一异常回滚而删掉。组剩余不足 60 秒拒绝续签；刷新不把 30 天截止时间无限后移。
+**并发行为：** 同一 refreshToken 可同时刷新，多次刷新均复用一条会话。刷新与登出竞争时，刷新可能先读到有效记录并返回 JWT；因为没有新增或恢复会话，登出完成后 authenticate 会拒绝该 session 的所有 JWT。已经通过认证的在途业务请求仍可能执行完毕；登出不是撤回已执行请求。
 
-技术：Spring 事务例外配置、MySQL 行锁、令牌轮换与重放检测、JJWT。源码：[实现][auth-service] / [会话 SQL][session-xml]。
+技术：SHA-256 令牌哈希、JJWT、数据库会话状态检查。没有刷新令牌轮换、familyId、重放检测或“抛401仍提交撤销”的事务例外。源码：[实现][auth-service] / [会话 SQL][session-xml]。
 
 ### 04. 登出：POST /auth/logout
 
@@ -237,15 +234,19 @@ SQL：查询/锁定 sessions，读取 users，插入新 sessions，更新旧 ses
 
 ```text
 AuthController.logout
-  → AuthService.logout → AuthServiceImpl.logout [数据库事务]
-      → lockSession：哈希查询 → lockFamily → 锁定复查
-      → SessionMapper.revokeFamily(...,"LOGOUT",...)
+  → AuthService.logout → AuthServiceImpl.logout [单条原子 UPDATE]
+      → TokenGenerator.hash
+      → SessionMapper.revokeByRefreshHash
+          → UPDATE sessions SET revoked_at=当前UTC时间
+            WHERE refresh_token_hash=哈希 AND revoked_at IS NULL
   → ApiResponse.success(空对象)
 ```
 
-撤销对应 family 下全部会话。重复登出或查不到令牌也返回成功空对象；不删除账号、订单或权益。被撤销组的 accessToken 下次经 authenticate 查询 sessions 时就会被拒绝，不必等 JWT 自身到期。
+只撤销当前独立登录；同一账号的其他设备或浏览器登录不受影响。重复登出和未知令牌均返回成功，不删除账号、订单或权益。条件 UPDATE 由数据库保证原子性，无需先查询、组锁或显式多语句事务。下一次受保护请求经 authenticate 查询 sessions 时立即拒绝该会话的新旧 accessToken。
 
-技术：令牌哈希、组行锁、事务、数据库会话撤销。源码：[实现][auth-service] / [会话 SQL][session-xml]。
+前端先清除本地身份再提交登出，并丢弃退出后迟到的刷新结果。退出仅清除本机令牌但请求失败时，服务器尚未撤销；客户端提示实际失败。
+
+技术：令牌哈希、条件 UPDATE、数据库会话撤销。源码：[实现][auth-service] / [会话 SQL][session-xml]。
 
 ### 05. 当前用户：GET /me
 
@@ -747,7 +748,7 @@ HealthController.health
 | 表 | 当前职责 | 接口使用 |
 | --- | --- | --- |
 | users | 不变的自增用户 ID、用户名、密码哈希、角色/状态、余额等 | 注册登录、认证、个人资料、管理员复查、下单付款 |
-| sessions | 登录组、刷新令牌哈希、轮换与撤销 | 登录、认证、刷新、登出、清理 |
+| sessions | 独立登录、固定刷新令牌哈希、过期与撤销 | 登录、认证、刷新、登出、清理 |
 | categories | 分类名称、排序、启停等 | 公开分类、分类 CRUD、商品关联 |
 | wallpapers | 商品资料、发布状态，以及当前两份文件的位置/元数据 | 商品管理、公开浏览、封面、已购、下载 |
 | orders | 用户/商品归属、下单标题金额币种快照、付款状态/时间等 | 下单、列表、付款 |
@@ -760,7 +761,7 @@ HealthController.health
 | 场景 | 第一次检查 / 读取 | 第二次检查 / 约束 | 保护什么 |
 | --- | --- | --- | --- |
 | 注册/分类名称 | Service 普通查重 | 数据库唯一约束 | 两个请求都查到“没有”后不能同时插入同名 |
-| refresh/logout | 按刷新哈希普通查记录，定位 family | 组行锁，再锁定读令牌 | 轮换、登出、旧令牌重放不使用旧快照 |
+| refresh/logout | 刷新按哈希普通读当前会话 | 登出单条条件 UPDATE，刷新不写数据 | 不新增或恢复会话，退出后所有关联 JWT 被认证拒绝 |
 | 商品创建分类 | 上传前普通查询 | 上传后事务内锁定读分类 | 上传期间分类被停用/删除 |
 | 商品文件替换 | 上传前商品快照 | 上传后锁最新商品并比较文件标识 | 同一文件被其他请求替换后不能被旧请求覆盖 |
 | 商品写入管理员 | 请求进入时 AuthFilter | 长上传后写库前再次读用户 | 拒绝已降级/停用的账号；后一次用户读取不持角色行锁 |

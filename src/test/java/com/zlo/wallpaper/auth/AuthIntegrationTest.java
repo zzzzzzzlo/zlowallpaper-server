@@ -35,7 +35,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * 验证用户认证与会话轮换的自动测试或测试配置。
+ * 验证用户认证与独立登录会话的自动测试或测试配置。
  * 创建位置：由JUnit/Spring Test测试框架创建；仅用于src/test，不注册为生产业务组件。
  */
 @SpringBootTest(properties = "spring.datasource.url=jdbc:h2:mem:auth;MODE=MySQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000")
@@ -195,14 +195,14 @@ class AuthIntegrationTest {
     }
 
     /**
-     * 验证访问令牌过期后仍可刷新，旧刷新令牌可注销所属登录组。
+     * 验证访问令牌过期后仍可刷新，固定刷新令牌可注销当前登录。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily() throws Exception {
+    void expiredAccessCanRefreshAndLogoutTheSession() throws Exception {
         JsonNode first = registerAndLogin("learner");
         Long userId = jdbc.queryForObject("SELECT id FROM users", Long.class);
         Long sessionId = jdbc.queryForObject("SELECT id FROM sessions", Long.class);
@@ -236,54 +236,55 @@ class AuthIntegrationTest {
     }
 
     /**
-     * 验证刷新轮换令牌但不延长整组截止时间。
+     * 验证刷新保留令牌、会话ID与固定截止时间。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void refreshRotatesBothTokensAndKeepsFixedFamilyExpiry() throws Exception {
+    void refreshKeepsTokenSessionAndFixedExpiry() throws Exception {
         JsonNode first = registerAndLogin("learner");
+        LocalDateTime expiry = jdbc.queryForObject("SELECT expires_at FROM sessions", LocalDateTime.class);
         JsonNode next = body(postJson("/auth/refresh", refresh(first), 200)).path("data");
-        assertNotEquals(first.path("refreshToken").asText(), next.path("refreshToken").asText());
-        assertNotEquals(first.path("accessToken").asText(), next.path("accessToken").asText());
+        assertEquals(first.path("refreshToken").asText(), next.path("refreshToken").asText());
+        postJson("/auth/refresh", refresh(first), 200);
         getWithToken("/me", next.path("accessToken").asText(), 200);
-        getWithToken("/me", first.path("accessToken").asText(), 401);
-        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(DISTINCT family_id) FROM sessions", Integer.class));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(DISTINCT expires_at) FROM sessions", Integer.class));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions WHERE replaced_by_id IS NOT NULL", Integer.class));
+        getWithToken("/me", first.path("accessToken").asText(), 200);
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
+        assertEquals(expiry, jdbc.queryForObject("SELECT expires_at FROM sessions", LocalDateTime.class));
     }
 
     /**
-     * 验证刷新重放返回401时仍提交撤销，且不影响其他独立登录。
+     * 验证刷新与撤销仅作用于当前登录。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin() throws Exception {
+    void refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin() throws Exception {
         JsonNode first = registerAndLogin("learner");
         JsonNode another = login("learner");
         JsonNode next = body(postJson("/auth/refresh", refresh(first), 200)).path("data");
-        assertCode(postJson("/auth/refresh", refresh(first), 401), "SESSION_EXPIRED");
+        postJson("/auth/refresh", refresh(first), 200);
+        postJson("/auth/logout", refresh(first), 200);
         getWithToken("/me", next.path("accessToken").asText(), 401);
         postJson("/auth/refresh", refresh(next), 401);
         getWithToken("/me", another.path("accessToken").asText(), 200);
-        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM sessions WHERE revoke_reason='REPLAY'", Integer.class));
+        postJson("/auth/refresh", refresh(another), 200);
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions WHERE revoked_at IS NOT NULL", Integer.class));
     }
 
     /**
-     * 验证注销可重复调用并撤销整组，无需有效访问令牌。
+     * 验证注销可重复调用并撤销当前会话，无需有效访问令牌。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken() throws Exception {
+    void logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken() throws Exception {
         JsonNode first = registerAndLogin("learner");
         JsonNode second = login("learner");
         MvcResult result = postJson("/auth/logout", refresh(first), 200);
@@ -338,7 +339,8 @@ class AuthIntegrationTest {
         getWithToken("/me", token, 401);
         postJson("/auth/refresh", refresh(session), 401);
         jdbc.update("UPDATE users SET status='ACTIVE'");
-        getWithToken("/me", token, 401); // 刷新时的禁用处理已经撤销整组。
+        // 禁用期间拒绝访问和刷新；只读刷新不会永久撤销会话，恢复账号后仍可使用未到期会话。
+        getWithToken("/me", token, 200);
     }
 
     /**
@@ -362,14 +364,14 @@ class AuthIntegrationTest {
     }
 
     /**
-     * 验证并发刷新不能留下两个有效后继会话。
+     * 验证并发刷新共享一条有效会话。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void parallelRefreshCanNeverCreateTwoActiveDescendants() throws Exception {
+    void parallelRefreshSharesOneActiveSession() throws Exception {
         JsonNode session = registerAndLogin("learner");
         String refreshToken = session.path("refreshToken").asText();
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -378,25 +380,58 @@ class AuthIntegrationTest {
             Future<Boolean> first = executor.submit(() -> concurrentRefresh(start, refreshToken));
             Future<Boolean> second = executor.submit(() -> concurrentRefresh(start, refreshToken));
             start.countDown();
-            assertNotEquals(first.get(15, TimeUnit.SECONDS), second.get(15, TimeUnit.SECONDS));
-            assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
+            assertTrue(first.get(15, TimeUnit.SECONDS));
+            assertTrue(second.get(15, TimeUnit.SECONDS));
+            assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
+            assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL", Integer.class));
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test
+    void logoutRacingRefreshCannotRestoreSession() throws Exception {
+        JsonNode session = registerAndLogin("learner");
+        String refreshToken = session.path("refreshToken").asText();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<String> refresh = executor.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                try { return authService.refresh(refreshToken).getAccessToken(); }
+                catch (com.zlo.wallpaper.common.BusinessException exception) {
+                    assertEquals("SESSION_EXPIRED", exception.getCode());
+                    return null;
+                }
+            });
+            Future<?> logout = executor.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                authService.logout(refreshToken);
+                return null;
+            });
+            start.countDown();
+            String refreshedAccess = refresh.get(15, TimeUnit.SECONDS);
+            logout.get(15, TimeUnit.SECONDS);
+            assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
             assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL", Integer.class));
+            // 即使刷新先读到了有效会话，登出完成后新旧JWT都不能再通过认证。
+            if (refreshedAccess != null) { getWithToken("/me", refreshedAccess, 401); }
+            getWithToken("/me", session.path("accessToken").asText(), 401);
+            postJson("/auth/refresh", refresh(session), 401);
         } finally { executor.shutdownNow(); }
     }
 
     /**
-     * 验证会话清理保留截止时间及保留期内的轮换历史。
+     * 验证会话清理保留尚未超过到期保留期的记录。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void cleanupRetainsRotationHistoryUntilFamilyExpiryPlusRetention() throws Exception {
+    void cleanupRetainsSessionsUntilExpiryPlusRetention() throws Exception {
         JsonNode first = registerAndLogin("learner");
         postJson("/auth/refresh", refresh(first), 200);
         cleanup.cleanExpiredSessions();
-        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
         jdbc.update("UPDATE sessions SET created_at=?, expires_at=?", LocalDateTime.now().minusDays(20),
                 LocalDateTime.now().minusDays(8));
         cleanup.cleanExpiredSessions();
@@ -406,7 +441,7 @@ class AuthIntegrationTest {
 
     /**
      * 准备同步起跑的线程，验证并发刷新结果与数据库状态。
-     * 调用/引用位置：AuthIntegrationTest.parallelRefreshCanNeverCreateTwoActiveDescendants。
+     * 调用/引用位置：AuthIntegrationTest.parallelRefreshSharesOneActiveSession。
      *
      * @param latch 本方法使用的CountDownLatch输入，按上面的业务用途处理
      * @param token 刷新令牌或访问令牌字符串，按当前方法用途处理且不得写入日志
@@ -431,7 +466,7 @@ class AuthIntegrationTest {
     }
     /**
      * 构造刷新或登出请求的refreshToken测试JSON参数。
-     * 调用/引用位置：AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.cleanupRetainsRotationHistoryUntilFamilyExpiryPlusRetention、AuthIntegrationTest.expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.refreshRotatesBothTokensAndKeepsFixedFamilyExpiry、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin。
+     * 调用/引用位置：AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.cleanupRetainsSessionsUntilExpiryPlusRetention、AuthIntegrationTest.expiredAccessCanRefreshAndLogoutTheSession、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.refreshKeepsTokenSessionAndFixedExpiry、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin。
      *
      * @param session 已查询或新创建的会话实体
      * @return 上述处理得到的Map&lt;String, String&gt;结果；业务校验失败时通过异常返回错误
@@ -451,7 +486,7 @@ class AuthIntegrationTest {
     }
     /**
      * 注册测试账号并登录，必要时配置测试角色，返回令牌或会话。
-     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.cleanupRetainsRotationHistoryUntilFamilyExpiryPlusRetention、AuthIntegrationTest.expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.loginAndMeMatchContractAndDoNotLeakInternalFields、AuthIntegrationTest.logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.parallelRefreshCanNeverCreateTwoActiveDescendants、AuthIntegrationTest.refreshRotatesBothTokensAndKeepsFixedFamilyExpiry、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin。
+     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.cleanupRetainsSessionsUntilExpiryPlusRetention、AuthIntegrationTest.expiredAccessCanRefreshAndLogoutTheSession、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.loginAndMeMatchContractAndDoNotLeakInternalFields、AuthIntegrationTest.logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.parallelRefreshSharesOneActiveSession、AuthIntegrationTest.refreshKeepsTokenSessionAndFixedExpiry、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin。
      *
      * @param username 待查询或注册的用户名
      * @return 解析后的测试JSON节点，供用例读取业务字段
@@ -462,7 +497,7 @@ class AuthIntegrationTest {
     }
     /**
      * 登录或注册并登录测试账号，获取当前用例使用的令牌或业务身份。
-     * 调用/引用位置：AuthIntegrationTest.logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.registerAndLogin、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin。
+     * 调用/引用位置：AuthIntegrationTest.logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.registerAndLogin、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin。
      *
      * @param username 待查询或注册的用户名
      * @return 解析后的测试JSON节点，供用例读取业务字段
@@ -472,7 +507,7 @@ class AuthIntegrationTest {
     }
     /**
      * 通过MockMvc发送JSON请求，并断言实际HTTP状态。
-     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.cleanupRetainsRotationHistoryUntilFamilyExpiryPlusRetention、AuthIntegrationTest.expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.invalidPasswordsAreRejected、AuthIntegrationTest.invalidUsernamesAreRejected、AuthIntegrationTest.login、AuthIntegrationTest.logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.longUnicodePasswordsWorkAndPasswordWhitespaceIsPreserved、AuthIntegrationTest.missingAndMalformedJsonReturnSafeValidationErrors、AuthIntegrationTest.refreshRotatesBothTokensAndKeepsFixedFamilyExpiry、AuthIntegrationTest.register、AuthIntegrationTest.registrationStoresHashAndOrdinaryRoleWithoutLoggingIn、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin、AuthIntegrationTest.wrongPasswordUnknownAndDisabledAccountsCannotLogin。
+     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.cleanupRetainsSessionsUntilExpiryPlusRetention、AuthIntegrationTest.expiredAccessCanRefreshAndLogoutTheSession、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.invalidPasswordsAreRejected、AuthIntegrationTest.invalidUsernamesAreRejected、AuthIntegrationTest.login、AuthIntegrationTest.logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.longUnicodePasswordsWorkAndPasswordWhitespaceIsPreserved、AuthIntegrationTest.missingAndMalformedJsonReturnSafeValidationErrors、AuthIntegrationTest.refreshKeepsTokenSessionAndFixedExpiry、AuthIntegrationTest.register、AuthIntegrationTest.registrationStoresHashAndOrdinaryRoleWithoutLoggingIn、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin、AuthIntegrationTest.wrongPasswordUnknownAndDisabledAccountsCannotLogin。
      *
      * @param path 请求路径或服务器控制的文件路径
      * @param payload 本方法使用的Object输入，按上面的业务用途处理
@@ -486,7 +521,7 @@ class AuthIntegrationTest {
     }
     /**
      * 通过MockMvc发送带Bearer令牌的查询并断言HTTP状态。
-     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.loginAndMeMatchContractAndDoNotLeakInternalFields、AuthIntegrationTest.logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.refreshRotatesBothTokensAndKeepsFixedFamilyExpiry、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin。
+     * 调用/引用位置：AuthIntegrationTest.accessTokenCannotClaimAnotherUsersSession、AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.expiredAccessCanRefreshAndLogoutTheSession、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.loginAndMeMatchContractAndDoNotLeakInternalFields、AuthIntegrationTest.logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.refreshKeepsTokenSessionAndFixedExpiry、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin。
      *
      * @param path 请求路径或服务器控制的文件路径
      * @param token 刷新令牌或访问令牌字符串，按当前方法用途处理且不得写入日志
@@ -499,7 +534,7 @@ class AuthIntegrationTest {
     }
     /**
      * 解析测试HTTP响应的完整JSON外壳。
-     * 调用/引用位置：AuthIntegrationTest.assertCode、AuthIntegrationTest.expiredAccessCanRefreshAndOldRefreshCanLogoutTheWholeFamily、AuthIntegrationTest.login、AuthIntegrationTest.loginAndMeMatchContractAndDoNotLeakInternalFields、AuthIntegrationTest.logoutRevokesFamilyIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.refreshRotatesBothTokensAndKeepsFixedFamilyExpiry、AuthIntegrationTest.registrationStoresHashAndOrdinaryRoleWithoutLoggingIn、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin。
+     * 调用/引用位置：AuthIntegrationTest.assertCode、AuthIntegrationTest.expiredAccessCanRefreshAndLogoutTheSession、AuthIntegrationTest.login、AuthIntegrationTest.loginAndMeMatchContractAndDoNotLeakInternalFields、AuthIntegrationTest.logoutRevokesSessionIsRetryableAndDoesNotNeedValidAccessToken、AuthIntegrationTest.refreshKeepsTokenSessionAndFixedExpiry、AuthIntegrationTest.registrationStoresHashAndOrdinaryRoleWithoutLoggingIn、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin。
      *
      * @param result 本方法要转换或断言的执行结果
      * @return 解析后的测试JSON节点，供用例读取业务字段
@@ -509,7 +544,7 @@ class AuthIntegrationTest {
     }
     /**
      * 断言错误响应的业务码与统一错误格式。
-     * 调用/引用位置：AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.invalidPasswordsAreRejected、AuthIntegrationTest.invalidUsernamesAreRejected、AuthIntegrationTest.registrationStoresHashAndOrdinaryRoleWithoutLoggingIn、AuthIntegrationTest.replayRevocationCommitsDespite401AndDoesNotRevokeAnotherLogin、AuthIntegrationTest.wrongPasswordUnknownAndDisabledAccountsCannotLogin。
+     * 调用/引用位置：AuthIntegrationTest.adminPermissionUsesCurrentDatabaseRoleAndStatus、AuthIntegrationTest.expiredSessionAndJwtAndForgedTokenAreRejected、AuthIntegrationTest.invalidPasswordsAreRejected、AuthIntegrationTest.invalidUsernamesAreRejected、AuthIntegrationTest.registrationStoresHashAndOrdinaryRoleWithoutLoggingIn、AuthIntegrationTest.refreshingAndRevokingOneLoginDoesNotAffectAnotherLogin、AuthIntegrationTest.wrongPasswordUnknownAndDisabledAccountsCannotLogin。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      * @param result 本方法要转换或断言的执行结果

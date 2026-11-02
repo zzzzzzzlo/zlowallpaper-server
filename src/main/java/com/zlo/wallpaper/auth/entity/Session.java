@@ -5,7 +5,7 @@ import lombok.Setter;
 import java.time.LocalDateTime;
 
 /**
- * 对应sessions数据库记录，保存令牌哈希、轮换链、撤销信息和固定截止时间。
+ * 对应一次独立登录，保存刷新令牌哈希、有效期和撤销时间。
  * 创建方式：业务层通过new创建，或由MyBatis/Jackson根据查询/数据绑定结果构造；不作为Spring组件注入。
  * 显式实例化位置：AuthServiceImpl.createSession。
  * 数据库映射位置：src/main/resources/mapper/auth/SessionMapper.xml。
@@ -16,11 +16,8 @@ import java.time.LocalDateTime;
 public class Session {
     private Long id;
     private Long userId;
-    private String familyId;
     private String refreshTokenHash;
     private LocalDateTime createdAt;
     private LocalDateTime expiresAt;
     private LocalDateTime revokedAt;
-    private String revokeReason;
-    private Long replacedById;
 }

@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 验证用户认证与会话轮换的自动测试或测试配置。
+ * 验证用户认证与独立登录会话的自动测试或测试配置。
  * 创建位置：由JUnit/Spring Test测试框架创建；仅用于src/test，不注册为生产业务组件。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE,
@@ -71,19 +71,22 @@ class AuthMySqlIT {
     }
 
     /**
-     * 验证MySQL真实映射与重放撤销事务提交正确。
+     * 验证MySQL固定会话刷新与独立登出。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void roundTripAndReplayCommitOnMySql() {
+    void refreshReusesSessionAndLogoutIsIndependentOnMySql() {
         SessionVO first = login();
         SessionVO independent = login();
         SessionVO next = authService.refresh(first.getRefreshToken());
         assertEquals(userId, authService.authenticate(next.getAccessToken()).getId());
-        assertThrows(BusinessException.class, () -> authService.refresh(first.getRefreshToken()));
+        assertEquals(first.getRefreshToken(), next.getRefreshToken());
+        authService.refresh(first.getRefreshToken());
+        assertEquals(userId, authService.authenticate(first.getAccessToken()).getId());
+        authService.logout(first.getRefreshToken());
         assertThrows(BusinessException.class, () -> authService.authenticate(next.getAccessToken()));
         assertEquals(userId, authService.authenticate(independent.getAccessToken()).getId());
         authService.logout(independent.getRefreshToken());
@@ -91,14 +94,14 @@ class AuthMySqlIT {
     }
 
     /**
-     * 验证MySQL并发刷新只有一个成功者并按重放规则撤销整组。
+     * 验证MySQL并发刷新均成功且只保留一条会话。
      * 框架调用位置：JUnit测试引擎执行当前用例。
      * 输入参数：无。
      * 返回：无返回值；结果通过数据库、上下文、响应或测试断言体现。
      *
      */
     @Test
-    void concurrentRefreshHasOneWinnerAndRevokesReplayFamilyOnMySql() throws Exception {
+    void concurrentRefreshKeepsOneActiveSessionOnMySql() throws Exception {
         SessionVO first = login();
         ExecutorService executor = Executors.newFixedThreadPool(2);
         CountDownLatch start = new CountDownLatch(1);
@@ -106,9 +109,10 @@ class AuthMySqlIT {
             Future<Boolean> a = executor.submit(() -> refreshTogether(start, first.getRefreshToken()));
             Future<Boolean> b = executor.submit(() -> refreshTogether(start, first.getRefreshToken()));
             start.countDown();
-            assertNotEquals(a.get(15, TimeUnit.SECONDS), b.get(15, TimeUnit.SECONDS));
-            assertEquals(2, count("SELECT COUNT(*) FROM sessions WHERE user_id=?"));
-            assertEquals(0, count("SELECT COUNT(*) FROM sessions WHERE user_id=? AND revoked_at IS NULL"));
+            assertTrue(a.get(15, TimeUnit.SECONDS));
+            assertTrue(b.get(15, TimeUnit.SECONDS));
+            assertEquals(1, count("SELECT COUNT(*) FROM sessions WHERE user_id=?"));
+            assertEquals(1, count("SELECT COUNT(*) FROM sessions WHERE user_id=? AND revoked_at IS NULL"));
         } finally { executor.shutdownNow(); }
     }
 
@@ -134,13 +138,16 @@ class AuthMySqlIT {
             start.countDown();
             refresh.get(15, TimeUnit.SECONDS);
             logout.get(15, TimeUnit.SECONDS);
+            assertEquals(1, count("SELECT COUNT(*) FROM sessions WHERE user_id=?"));
             assertEquals(0, count("SELECT COUNT(*) FROM sessions WHERE user_id=? AND revoked_at IS NULL"));
+            assertThrows(BusinessException.class, () -> authService.authenticate(first.getAccessToken()));
+            assertThrows(BusinessException.class, () -> authService.refresh(first.getRefreshToken()));
         } finally { executor.shutdownNow(); }
     }
 
     /**
      * 让刷新或登出请求同时执行，收集每个线程的业务结果。
-     * 调用/引用位置：AuthMySqlIT.concurrentRefreshHasOneWinnerAndRevokesReplayFamilyOnMySql、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql。
+     * 调用/引用位置：AuthMySqlIT.concurrentRefreshKeepsOneActiveSessionOnMySql、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql。
      *
      * @param start 本方法使用的CountDownLatch输入，按上面的业务用途处理
      * @param token 刷新令牌或访问令牌字符串，按当前方法用途处理且不得写入日志
@@ -154,7 +161,7 @@ class AuthMySqlIT {
 
     /**
      * 查询本测试关注的记录数量，表名来自测试常量而不是客户端输入。
-     * 调用/引用位置：AuthMySqlIT.concurrentRefreshHasOneWinnerAndRevokesReplayFamilyOnMySql、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql。
+     * 调用/引用位置：AuthMySqlIT.concurrentRefreshKeepsOneActiveSessionOnMySql、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql。
      *
      * @param sql 本方法使用的String输入，按上面的业务用途处理
      * @return 上述处理得到的int结果；业务校验失败时通过异常返回错误
@@ -163,7 +170,7 @@ class AuthMySqlIT {
 
     /**
      * 登录或注册并登录测试账号，获取当前用例使用的令牌或业务身份。
-     * 调用/引用位置：AuthMySqlIT.concurrentRefreshHasOneWinnerAndRevokesReplayFamilyOnMySql、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql、AuthMySqlIT.roundTripAndReplayCommitOnMySql。
+     * 调用/引用位置：AuthMySqlIT.concurrentRefreshKeepsOneActiveSessionOnMySql、AuthMySqlIT.logoutRacingRefreshCannotLeaveActiveSessionOnMySql、AuthMySqlIT.refreshReusesSessionAndLogoutIsIndependentOnMySql。
      * 输入参数：无。
      *
      * @return 新accessToken、refreshToken、实际有效秒数expiresIn及公开UserVO
