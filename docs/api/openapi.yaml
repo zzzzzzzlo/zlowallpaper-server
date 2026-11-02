@@ -373,9 +373,17 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Page' }
         - { $ref: '#/components/parameters/PageSize' }
+        - name: publicationStatus
+          in: query
+          description: 可选壁纸状态；省略或空字符串表示全部状态
+          schema: { type: string, enum: ['', PUBLISHED, DRAFT, WITHDRAWN] }
+        - name: categoryId
+          in: query
+          description: 可选分类ID；包含停用分类，省略或空字符串不限分类；与状态同时传入时取交集
+          schema: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9._-]*$' }
       responses:
         '200':
-          description: 含 DRAFT/PUBLISHED/WITHDRAWN 的分页
+          description: 按状态与分类筛选后的分页，total为筛选总数；不传条件时包含全部状态
           content:
             application/json:
               schema:

@@ -66,6 +66,14 @@
     <select id="selectPage" resultMap="wallpaper">
         SELECT <include refid="columns"/>, c.name AS category_name
         FROM wallpapers w JOIN categories c ON c.id = w.category_id
+        <where>
+            <if test="publicationStatus != null and publicationStatus != ''">
+                w.publication_status = #{publicationStatus}
+            </if>
+            <if test="categoryId != null">
+                AND w.category_id = #{categoryId}
+            </if>
+        </where>
         ORDER BY w.created_at DESC, w.id DESC
     </select>
     <select id="selectById" resultMap="wallpaper">

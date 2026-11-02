@@ -47,9 +47,13 @@ public class AdminWallpaperServiceImpl implements AdminWallpaperService {
      */
     @Override
     public PageVO<AdminWallpaperVO> getWallpapers(AdminWallpaperQueryDTO query) {
+        String category = query.getCategoryId();
+        Long categoryId = category == null || category.isEmpty() ? null : CatalogIds.findDatabaseId(category);
+        // 非空分类无法映射为数据库ID时应返回空列表，不能退回“不限分类”。停用分类仍可筛选。
+        if (category != null && !category.isEmpty() && categoryId == null) { categoryId = -1L; }
         Page<Wallpaper> page = new Page<>(query.getPage(), query.getPageSize());
         page.setOptimizeJoinOfCountSql(false);
-        IPage<Wallpaper> result = mapper.selectPage(page);
+        IPage<Wallpaper> result = mapper.selectPage(page, query.getPublicationStatus(), categoryId);
         List<AdminWallpaperVO> items = new ArrayList<>();
         for (Wallpaper wallpaper : result.getRecords()) { items.add(toVO(wallpaper)); }
         return new PageVO<>(items, query.getPage(), query.getPageSize(), result.getTotal());

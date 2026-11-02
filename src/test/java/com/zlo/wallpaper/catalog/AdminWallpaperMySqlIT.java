@@ -59,7 +59,7 @@ class AdminWallpaperMySqlIT {
         assertEquals(wallpaper.getCover().getSha256(),stored.getCover().getSha256());
         assertEquals(base,stored.getCover().getUploadedBy());assertEquals(1,mapper.countFileReferences("test-bucket",stored.getCover().getObjectKey()));
         Page<Wallpaper> page=new Page<>(1,50); page.setOptimizeJoinOfCountSql(false);
-        assertTrue(mapper.selectPage(page).getRecords().stream().anyMatch(item -> item.getId().equals(wallpaper.getId())));
+        assertTrue(mapper.selectPage(page, null, null).getRecords().stream().anyMatch(item -> item.getId().equals(wallpaper.getId())));
     }
     /**
      * 验证MySQL部分更新保留封面，上架决定公开可见性。

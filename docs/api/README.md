@@ -10,6 +10,8 @@
 - 源封面最大10 MiB，生成长边最多1920、JPEG q=2 的图片，存储/读取仍最大4 MiB；原文件最大10 GiB。
 - 商城和已购返回 `{items,page,pageSize,total}`，默认每页12条、最多50条；订单列表仍是最多1000条的数组，超限明确报错。
 
+管理员商品分页 `GET /admin/wallpapers` 额外支持可选的 `publicationStatus` 与 `categoryId`，可单独或组合使用。状态值为PUBLISHED/DRAFT/WITHDRAWN，分类可选择停用项；省略或空字符串不限，total按筛选结果计算。示例：`/admin/wallpapers?page=1&pageSize=12&publicationStatus=PUBLISHED&categoryId=1`。
+
 创建收费订单只得到 PENDING，不代表已经购买。付款事务成功后才扣余额、更新状态和新增权益。关闭客户端确认窗口不会删除订单。
 
 已购读取当前商品，订单保留下单标题/金额快照。停售商品不能经公开详情和封面读取，已购账号可通过自己的入口访问。

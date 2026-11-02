@@ -201,6 +201,67 @@ class AdminWallpaperIntegrationTest {
         request(get("/admin/wallpapers").param("page","1","2"),adminToken,400);
     }
 
+    @Test void adminFiltersCombineStatusAndCategoryBeforePaginationIncludingDisabledCategories() throws Exception {
+        String published = create().path("id").asText(); publish(published,"PUBLISHED",200);
+        String disabledPublished = create().path("id").asText(); publish(disabledPublished,"PUBLISHED",200);
+        create();
+        String disabledDraft = create().path("id").asText();
+        String disabledWithdrawn = create().path("id").asText(); publish(disabledWithdrawn,"WITHDRAWN",200);
+        // 管理端需要检索已有停用分类商品，不能沿用公开分类的 enabled=1 条件。
+        jdbc.update("UPDATE wallpapers SET category_id=2 WHERE id IN (?,?,?)", disabledPublished, disabledDraft, disabledWithdrawn);
+
+        JsonNode publishedPage = body(request(get("/admin/wallpapers").param("publicationStatus","PUBLISHED"),adminToken,200)).path("data");
+        assertEquals(2, publishedPage.path("total").asInt());
+        JsonNode combined = body(request(get("/admin/wallpapers").param("publicationStatus","PUBLISHED").param("categoryId","2"),adminToken,200)).path("data");
+        assertEquals(1, combined.path("total").asInt());
+        assertEquals(disabledPublished, combined.path("items").get(0).path("id").asText());
+        for (String status : List.of("DRAFT", "WITHDRAWN")) {
+            JsonNode filtered = body(request(get("/admin/wallpapers").param("publicationStatus",status).param("categoryId","2"),adminToken,200)).path("data");
+            assertEquals(1, filtered.path("total").asInt());
+            assertEquals(status, filtered.path("items").get(0).path("publicationStatus").asText());
+        }
+        JsonNode first = body(request(get("/admin/wallpapers").param("categoryId","2").param("pageSize","2"),adminToken,200)).path("data");
+        assertEquals(3, first.path("total").asInt()); assertEquals(2, first.path("items").size());
+        for (JsonNode item : first.path("items")) { assertEquals("2", item.path("categoryId").asText()); }
+        JsonNode second = body(request(get("/admin/wallpapers").param("categoryId","2").param("pageSize","2").param("page","2"),adminToken,200)).path("data");
+        assertEquals(3, second.path("total").asInt()); assertEquals(1, second.path("items").size());
+        assertEquals(0, body(request(get("/admin/wallpapers").param("categoryId","unknown"),adminToken,200)).path("data").path("total").asInt());
+        assertEquals(5, body(request(get("/admin/wallpapers").param("categoryId","").param("publicationStatus",""),adminToken,200)).path("data").path("total").asInt());
+    }
+
+    @Test void adminFiltersRejectInvalidAndRepeatedParametersWithoutRelaxingPermissions() throws Exception {
+        request(get("/admin/wallpapers").param("publicationStatus","DELETED"),adminToken,400);
+        request(get("/admin/wallpapers").param("publicationStatus","published"),adminToken,400);
+        request(get("/admin/wallpapers").param("publicationStatus","PUBLISHED","DRAFT"),adminToken,400);
+        request(get("/admin/wallpapers").param("categoryId","1","2"),adminToken,400);
+        request(get("/admin/wallpapers").param("categoryId","1 OR 1=1"),adminToken,400);
+        request(get("/admin/wallpapers").param("publicationStatus","DRAFT").param("categoryId","2"),null,401);
+        request(get("/admin/wallpapers").param("publicationStatus","DRAFT").param("categoryId","2"),userToken,403);
+    }
+
+    @Test void adminFiltersWorkThroughRealHttpWithIsolatedTestAccount() throws Exception {
+        create();
+        String draft = create().path("id").asText();
+        jdbc.update("UPDATE wallpapers SET category_id=2 WHERE id=?", draft);
+        String address = "http://127.0.0.1:" + port + "/api/v1/admin/wallpapers?page=1&pageSize=1&publicationStatus=DRAFT&categoryId=2";
+        // 使用本测试在H2创建的会话，不读取开发机账号或访问真实商城数据库。
+        try (java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient()) {
+            java.net.http.HttpRequest query = java.net.http.HttpRequest.newBuilder(java.net.URI.create(address))
+                    .header("Authorization", "Bearer " + adminToken)
+                    .header("Origin", "http://127.0.0.1:14173").GET().build();
+            java.net.http.HttpResponse<String> response = client.send(query, java.net.http.HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode());
+            assertEquals("http://127.0.0.1:14173", response.headers().firstValue("Access-Control-Allow-Origin").orElse(""));
+            JsonNode data = json.readTree(response.body()).path("data");
+            assertEquals(1, data.path("total").asInt());
+            assertEquals(draft, data.path("items").get(0).path("id").asText());
+            assertEquals("2", data.path("items").get(0).path("categoryId").asText());
+            assertEquals("DRAFT", data.path("items").get(0).path("publicationStatus").asText());
+            java.net.http.HttpRequest anonymous = java.net.http.HttpRequest.newBuilder(java.net.URI.create(address)).GET().build();
+            assertEquals(401, client.send(anonymous, java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode());
+        }
+    }
+
     /**
      * 验证部分修改保留文件和发布状态，仅替换指定原文件。
      * 框架调用位置：JUnit测试引擎执行当前用例。

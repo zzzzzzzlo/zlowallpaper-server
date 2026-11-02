@@ -421,17 +421,19 @@ AdminCategoryController.deleteCategory
 
 ### 14. 管理员商品分页：GET /admin/wallpapers
 
-输入：`AdminWallpaperQueryDTO {page,pageSize}`，默认 1/12、最大每页 50；仅接收这两个查询参数。200 返回 `PageVO<AdminWallpaperVO>`。
+输入：`AdminWallpaperQueryDTO {page,pageSize,publicationStatus,categoryId}`，默认 1/12、最大每页 50。状态可选PUBLISHED/DRAFT/WITHDRAWN，分类包含停用分类；两项省略或为空表示不限制，组合传入取交集。拒绝未知或重复参数。200 返回 `PageVO<AdminWallpaperVO>`，total是筛选后的总数。
 
 ```text
 AdminWallpaperController.getWallpapers
   → AdminWallpaperService.getWallpapers → AdminWallpaperServiceImpl.getWallpapers
-      → Page → AdminWallpaperMapper.selectPage → MP 分页拦截器
+      → 整理分类ID：非空且无法映射为数据库ID时匹配空结果
+      → Page → AdminWallpaperMapper.selectPage(page,publicationStatus,categoryId)
+          → XML动态WHERE：按状态/分类筛选 → MP分页与COUNT
       → toVO：当前文件元数据 + 管理员封面地址
   → ApiResponse.success
 ```
 
-SQL：wallpapers JOIN categories 取得分类名称，不按发布状态筛选，按商品 id DESC。XML resultMap 用 association 把商品行里的 original_*、cover_* 映射成两个 UploadedFile 中间对象；**这不代表另查了 assets 表**。VO 包含状态、两份文件名等，不返回原文件下载地址。
+SQL：wallpapers JOIN categories按category_id取得分类名称，动态WHERE先按发布状态和分类过滤，不添加分类enabled限制，再按created_at DESC、id DESC排序。分页与COUNT使用同一条件。XML resultMap用association把商品行里的original_*、cover_*映射成两个UploadedFile中间对象；**这不代表另查了assets表**。VO包含状态、两份文件名等，不返回原文件下载地址。
 
 技术：MP 分页、XML resultMap/association、DTO、VO。源码：[Controller][admin-wallpaper-controller] / [实现][admin-wallpaper-service] / [管理商品 SQL][admin-wallpaper-xml]。
 

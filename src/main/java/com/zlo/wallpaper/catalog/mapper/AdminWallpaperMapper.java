@@ -20,9 +20,12 @@ public interface AdminWallpaperMapper {
      * 调用/引用位置：AdminWallpaperMySqlIT.generatedKeyRoundTripMapsBothInlineFilesAndCategoryName、AdminWallpaperServiceImpl.getWallpapers。
      *
      * @param page 分页插件对象，控制查询范围并接收总数
+     * @param publicationStatus 可选发布状态，null或空字符串表示全部状态
+     * @param categoryId 可选数据库分类ID，不限制分类启停
      * @return 分页结果，包含当前页记录和插件计算的总数
      */
-    IPage<Wallpaper> selectPage(Page<Wallpaper> page);
+    IPage<Wallpaper> selectPage(Page<Wallpaper> page, @Param("publicationStatus") String publicationStatus,
+                                @Param("categoryId") Long categoryId);
     /**
      * 按主键读取数据库记录；不存在时返回null。
      * 调用/引用位置：AdminWallpaperIntegrationTest.cleanupNeverDeletesFilesStillReferencedByAnyProductOrActiveUpload、AdminWallpaperIntegrationTest.concurrentFileReplacementReturnsConflictAndKeepsOtherRequestFile、AdminWallpaperIntegrationTest.createWritesBothFilesInProductAndReturnsDraftWithoutCloudLocations、AdminWallpaperIntegrationTest.draftPreviewIsAdminOnlyAndPublishingControlsAllPublicQueries、AdminWallpaperIntegrationTest.partialUpdatePreservesFilesAndPublicationThenReplacesOnlyOriginal、AdminWallpaperMySqlIT.generatedKeyRoundTripMapsBothInlineFilesAndCategoryName、AdminWallpaperMySqlIT.partialUpdatePreservesCoverAndPublishingControlsReadVisibility、AdminWallpaperServiceImpl.updateWallpaper、WallpaperPersistenceService.publish、WallpaperPersistenceService.update。

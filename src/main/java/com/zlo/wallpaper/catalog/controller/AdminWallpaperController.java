@@ -108,7 +108,7 @@ public class AdminWallpaperController {
     public ApiResponse<PageVO<AdminWallpaperVO>> getWallpapers(@Valid @ModelAttribute AdminWallpaperQueryDTO query,
                                                                HttpServletRequest request) {
         for (String name : request.getParameterMap().keySet()) {
-            if (!Set.of("page", "pageSize").contains(name) || request.getParameterValues(name).length != 1) {
+            if (!Set.of("page", "pageSize", "publicationStatus", "categoryId").contains(name) || request.getParameterValues(name).length != 1) {
                 throw invalid();
             }
         }
