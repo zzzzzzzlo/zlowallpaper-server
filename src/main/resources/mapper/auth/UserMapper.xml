@@ -8,6 +8,12 @@
     <select id="selectById" resultType="com.zlo.wallpaper.auth.entity.User">
         SELECT <include refid="columns"/> FROM users WHERE id = #{id}
     </select>
+    <select id="selectByIdForUpdate" resultType="com.zlo.wallpaper.auth.entity.User">
+        SELECT <include refid="columns"/> FROM users WHERE id = #{id} FOR UPDATE
+    </select>
+    <update id="updatePassword">
+        UPDATE users SET password_hash = #{passwordHash}, updated_at = #{updatedAt} WHERE id = #{id}
+    </update>
     <select id="selectBalanceById" resultType="java.lang.Long">
         SELECT balance_cents FROM users WHERE id = #{id}
     </select>

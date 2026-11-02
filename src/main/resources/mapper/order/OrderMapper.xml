@@ -3,7 +3,7 @@
 <mapper namespace="com.zlo.wallpaper.order.mapper.OrderMapper">
     <sql id="orderColumns">
         id, user_id, wallpaper_id, title_snapshot, amount_cents, currency, status,
-        payment_method, created_at, paid_at, canceled_at, refunded_at, updated_at
+        payment_method, created_at, expires_at, cancel_reason, paid_at, canceled_at, refunded_at, updated_at
     </sql>
     <!-- 不关联当前商品：改名、调价和下架都不影响历史订单快照；user_id保护账号隔离。 -->
     <select id="selectOrdersByUserId" resultType="com.zlo.wallpaper.order.entity.Order">
@@ -33,14 +33,25 @@
     </select>
     <insert id="insertOrder" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO orders (user_id, wallpaper_id, title_snapshot, amount_cents, currency, status,
-                            payment_method, created_at, paid_at, updated_at)
+                            payment_method, created_at, expires_at, paid_at, updated_at)
         VALUES (#{userId}, #{wallpaperId}, #{titleSnapshot}, #{amountCents}, #{currency}, #{status},
-                #{paymentMethod}, #{createdAt}, #{paidAt}, #{updatedAt})
+                #{paymentMethod}, #{createdAt}, #{expiresAt}, #{paidAt}, #{updatedAt})
     </insert>
     <!-- 用户行和订单行已由Service依次锁定；只改变付款字段，不读取商品当前价格。 -->
     <update id="updatePaidStatus">
         UPDATE orders
         SET status = 'PAID', payment_method = 'COIN', paid_at = #{paidAt}, updated_at = #{updatedAt}
+        WHERE id = #{id} AND user_id = #{userId} AND status = 'PENDING' AND expires_at &gt; #{paidAt}
+    </update>
+    <update id="updateCanceledStatus">
+        UPDATE orders
+        SET status = 'CANCELED', cancel_reason = #{cancelReason}, canceled_at = #{canceledAt}, updated_at = #{updatedAt}
         WHERE id = #{id} AND user_id = #{userId} AND status = 'PENDING'
+    </update>
+    <!-- 不再申请用户/商品行锁；只按当前状态与到期时间更新，避免锁顺序交叉。 -->
+    <update id="closeExpiredOrders">
+        UPDATE orders
+        SET status = 'CANCELED', cancel_reason = 'TIMEOUT', canceled_at = #{now}, updated_at = #{now}
+        WHERE status = 'PENDING' AND expires_at &lt;= #{now}
     </update>
 </mapper>

@@ -20,4 +20,7 @@ public class OrderVO {
     private String currency;
     private String status;
     private OffsetDateTime createdAt;
+    private OffsetDateTime expiresAt;
+    private String cancelReason;
+    private OffsetDateTime canceledAt;
 }

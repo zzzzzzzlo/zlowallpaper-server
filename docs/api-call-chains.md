@@ -1,6 +1,6 @@
 # ZloWallpaper：接口调用链与技术说明
 
-核对日期：2026-11-02。以当前Controller、Service、Mapper XML与配置为依据，统一前缀为/api/v1，下文省略此前缀。本文覆盖25个已实现后端HTTP接口，公共封面辅助入口也在文中说明。
+核对日期：2026-11-02。以当前Controller、Service、Mapper XML与配置为依据，统一前缀为/api/v1，下文省略此前缀。本文覆盖27个已实现后端HTTP接口，公共封面辅助入口也在文中说明。
 
 先看公共调用类，再按接口阅读执行顺序、SQL、事务和技术。接口完整字段见[OpenAPI](api/openapi.yaml)，文件存储见[存储说明](storage.md)。后端不包含网页或Qt源码；这些客户端调用同一套接口。
 
@@ -134,7 +134,7 @@
 
 **前端消费者使用的技术：** Qt 客户端采用 C++17、Qt6 Widgets/Network/Concurrent，当前运行包 Qt 6.11.1（CMake 要求至少 6.8）。`ApiClient` 发 HTTP，`StoreService` 编排接口，信号/槽更新 UI；`QPropertyAnimation` 实现渐隐提示，`QSaveFile` 原子保存，Windows DPAPI 保护登录凭据，libmpv/FFmpeg 提供媒体能力。工作台采用原生 HTML/CSS/ES Modules，`api.js` 封装请求，fetch 与 multipart XMLHttpRequest 分别处理普通调用和上传进度；Node 提供本地静态服务。新用户网页采用 Vue 3.5.44、Vite 7.3.7 与官方 Vue 插件 6.0.10；`App.vue` 集中业务编排、`services/api.js` 统一 fetch/会话/Bearer/共享令牌刷新，原生 dialog 和 Popover 分别提供弹窗与提示，BigInt 保持字符串余额的精度。Vite 只负责本机代理和编译，不承担登录权限。Playwright、Node Test、Prettier 属于开发测试工具。它们不是后端 Service 依赖。
 
-## 三、25 个接口索引
+## 三、27 个接口索引
 
 “公开”指不要求本系统 accessToken；刷新和登出仍要求请求体携带 refreshToken。所有管理员入口统一由 AuthFilter 检查 ADMIN。
 
@@ -166,6 +166,10 @@
 | [24](#24.%20%E4%B8%8B%E8%BD%BD%E6%8E%88%E6%9D%83%EF%BC%9APOST%20%2Fwallpapers%2F%7Bid%7D%2Fdownload-grants) | POST `/wallpapers/{id}/download-grants` | 登录且有权益 | 申请五分钟下载授权 |
 | [25](#25.%20%E5%B0%B1%E7%BB%AA%E6%A3%80%E6%9F%A5%EF%BC%9AGET%20%2Fhealth) | GET `/health` | 公开 | MySQL 就绪检查 |
 
+| [26](#26.%20%E4%BF%AE%E6%94%B9%E5%AF%86%E7%A0%81%EF%BC%9APUT%20%2Fme%2Fpassword) | PUT `/me/password` | 登录 | 校验旧密码、修改密码、撤销该账号已有登录 |
+
+| [27](#27.%20%E5%8F%96%E6%B6%88%E8%AE%A2%E5%8D%95%EF%BC%9APOST%20%2Forders%2F%7Bid%7D%2Fcancel) | POST `/orders/{id}/cancel` | 登录 | 取消自己的待付款订单，幂等保留关闭结果 |
+
 ## 四、认证与个人信息
 
 ### 01. 注册：POST /auth/register
@@ -194,6 +198,7 @@ AuthController.login
   → AuthService.login → AuthServiceImpl.login [数据库事务]
       → UserMapper.selectByUsername
       → PasswordEncoder.matches
+      → UserMapper.selectByIdForUpdate：并发复查密码哈希、账号状态
       → TokenGenerator.generateRefreshToken
       → createSession：TokenGenerator.hash → SessionMapper.insert
       → sessionVO：JwtUtil.createAccessToken + UserVO
@@ -204,7 +209,9 @@ SQL：读取 users、插入 sessions。账号不存在时仍用预生成 dummyPa
 
 实际 accessToken 期限=min(配置 8 天，当前会话剩余时间)。user 仅含字符串 id、username、字符串 balanceCents；已删除 displayName。
 
-技术：PBKDF2、SecureRandom、SHA-256、JJWT、事务与自增主键回填。源码：[Controller][auth-controller] / [实现][auth-service] / [会话 SQL][session-xml]。
+并发复查：首次密码比较在加锁前；锁用户行后检查密码哈希仍相同且账号ACTIVE。改密也先锁同一用户行，因此先完成的登录会被随后改密撤销，改密先完成时旧密码不能创建新会话。
+
+技术：PBKDF2、SecureRandom、SHA-256、JJWT、用户行锁、事务与自增主键回填。源码：[Controller][auth-controller] / [实现][auth-service] / [会话 SQL][session-xml]。
 
 ### 03. 刷新：POST /auth/refresh
 
@@ -262,9 +269,34 @@ AuthFilter：认证后设置 BaseContext
   → ApiResponse.success
 ```
 
-只查询 users，无写事务或扣款操作。过滤器取的是请求认证时的身份，Service 再读取用于本次返回的用户资料；不返回密码哈希、内部角色/状态，也没有修改个人资料功能。
+只查询 users，无写事务或扣款操作。过滤器取的是请求认证时的身份，Service 再读取用于本次返回的用户资料；不返回密码哈希、内部角色/状态，修改密码使用下述独立入口，GET /me只读。
 
 技术：自写认证过滤器、ThreadLocal、MyBatis、VO 字段裁剪。源码：[Controller][user-controller] / [实现][user-service] / [用户 SQL][user-xml]。
+
+### 26. 修改密码：PUT /me/password
+
+输入：Bearer与JSON `{currentPassword,newPassword}`；用户ID取自BaseContext，确认新密码只由前端比对。200返回统一外壳且data为{}。
+
+```text
+AuthFilter.authenticate → BaseContext.setCurrentId
+  → UserController.changePassword：@Valid校验ChangePasswordDTO
+  → UserService.changePassword → UserServiceImpl.changePassword [数据库事务]
+      1. BaseContext.getCurrentId
+      2. UserMapper.selectByIdForUpdate：锁当前用户并复查ACTIVE状态
+      3. PasswordEncoder.matches：核对当前密码
+      4. 检查新密码与当前密码不同
+      5. PasswordEncoder.encode：生成带随机盐的PBKDF2哈希
+      6. UserMapper.updatePassword：只更新password_hash、updated_at
+      7. SessionMapper.revokeByUserId：撤销该账号所有未撤销会话
+  → 事务一起提交 → ApiResponse.success({})
+  → 前端清除当前凭证，提示使用新密码重新登录
+```
+
+旧密码错误返回400 CURRENT_PASSWORD_INCORRECT，新旧相同返回400 PASSWORD_UNCHANGED；都不修改密码或撤销会话。类型、8–128个Unicode字符和非纯空白规则与注册一致，密码不trim，也不返回或记录明文/哈希。无有效身份返回401 SESSION_EXPIRED。
+
+并发复查：过滤器认证和Service执行间账号状态可能改变，因此锁定用户行后再读最新状态。登录在密码比较后也取得同一用户行锁并复查哈希，保证旧密码登录不能在改密撤销之后再插入有效会话。同时提交两个使用相同旧密码的改密请求，只能有一个成功。会话撤销失败则密码更新也回滚。已通过认证的在途请求仍可能完成。
+
+没有新增表、缓存或依赖；用户名、角色、余额、订单和权益不改动。技术：Spring事务、MyBatis XML、MySQL FOR UPDATE、PBKDF2、条件UPDATE。源码：[用户入口][user-controller] / [用户实现][user-service] / [用户SQL][user-xml] / [会话SQL][session-xml]。
 
 ## 五、公开分类与商品浏览
 
@@ -543,7 +575,7 @@ AdminWallpaperController.getCover
 
 ## 八、订单与壁纸币
 
-三个订单接口共用 **九字段 OrderVO**：字符串 id/userId/wallpaperId、title、整数 amountCents、字符串 balanceCents、currency、status、createdAt。balanceCents 是本次读取的**当前余额**，不是订单历史余额，不增加订单表字段；100 个最小单位等于 1 枚壁纸币。新订单币种 ZLC，历史订单可能保留 CNY。源码：[OrderVO][order-vo]。
+四个订单接口共用 **十二字段 OrderVO**：字符串 id/userId/wallpaperId、title、整数 amountCents、字符串 balanceCents、currency、status、createdAt，以及expiresAt、cancelReason、canceledAt。后三项允许null：免费单没有付款截止时间，未关闭或历史未知记录没有关闭信息。balanceCents 是本次读取的**当前余额**，不是订单历史余额，不增加订单表字段；100 个最小单位等于 1 枚壁纸币。新订单币种 ZLC，历史订单可能保留 CNY。源码：[OrderVO][order-vo]。
 
 ### 19. 创建或复用订单：POST /orders
 
@@ -559,11 +591,11 @@ OrderController.createOrder
       5. EntitlementMapper.selectForUpdate：当前权益
           有权益 → selectOwnedOrderForUpdate 读来源 PAID 订单 → 返回复用
       6. 无权益 → OrderMapper.selectActiveOrderForUpdate
-          有 PENDING → 返回复用；PAID 却无对应权益 → 冲突
+          有未到期 PENDING → 保持截止时间返回复用；已到期 → closePendingOrder(TIMEOUT)后继续新建；PAID 却无对应权益 → 冲突
       7. 确需新订单：检查 PUBLISHED，按商品生成标题/金额/币种快照
       8. OrderMapper.insertOrder
           价格 0 → PAID/FREE → grantEntitlement → EntitlementMapper.insert
-          价格 >0 → PENDING，尚未扣款、尚无权益
+          价格 >0 → PENDING，expiresAt=创建时间+配置分钟数，尚未扣款、尚无权益
       9. result → toOrderVO(order,balanceCents)
   → OrderCreateResult.created 决定 Controller 的 201/200
 ```
@@ -625,6 +657,40 @@ OrderController.payOrder
 他人订单与不存在订单统一 404 ORDER_NOT_FOUND。商品后来调价或下架不改变既有待付款订单金额。免费历史单重复调用保留原方式，不追扣币。Qt payOrder → orderPaid 关闭对应确认窗口 → 刷新余额、权益和订单。
 
 技术：事务原子性、行锁顺序、条件 UPDATE、重复付款幂等、唯一约束。源码：[实现][order-service] / [订单 SQL][order-xml] / [余额 SQL][user-xml] / [权益 SQL][entitlement-xml]。
+
+### 27. 取消订单：POST /orders/{id}/cancel
+
+输入：Bearer与订单ID，无请求体；200返回OrderVO。用户不能指定购买者ID；订单不存在与他人订单均404 ORDER_NOT_FOUND。
+
+```text
+OrderController.cancelOrder
+  → OrderService.cancelOrder → OrderServiceImpl.cancelOrder [事务]
+      → BaseContext.getCurrentId：当前用户
+      → selectBuyerStatusForUpdate：先锁用户并复查ACTIVE状态
+      → selectOwnedOrderForUpdate：再锁本用户订单，读取最新状态
+      → CANCELED：直接返回首次关闭时间和原因
+      → PAID/REFUNDED：409 ORDER_NOT_CANCELABLE
+      → PENDING：按拿到锁后的服务器时间判断USER或TIMEOUT
+      → closePendingOrder → OrderMapper.updateCanceledStatus
+      → toOrderVO：返回当前余额、截止时间和关闭信息
+  → 提交事务 → ApiResponse.success
+```
+
+SQL只更新PENDING订单的status、cancel_reason、canceled_at和updated_at；不扣余额，不修改权益，不删除记录。重复取消不覆盖首次原因或时间；已超时订单不会被改成主动取消。取消与付款沿用用户→订单的锁顺序，只能由PENDING转成一种最终状态。
+
+付款到期处理仍在payOrder主流程：锁订单后检查截止时间；权益查询若等待了锁，扣款前再复查一次。超时先关闭并正常返回OrderVO，让事务提交；OrderController.payOrder在事务结束后将TIMEOUT结果转换为409 ORDER_EXPIRED、data:null，避免“更新后抛异常”回滚关闭。已付款的重复请求仍返回原PAID，不因截止时间过去而撤销付款。
+
+重新下单时，未到期旧单继续复用并保持expiresAt；过期旧单先关闭，释放active_wallpaper_id唯一约束，再用当前商品价格/标题创建新单。若本次新下单事务失败，其写入一起回滚，后续定时任务仍会关闭过期旧单。
+
+前端：网页订单列表和确认窗口、Qt订单列表和确认窗口均提供取消入口与剩余时间。关闭窗口只保留订单，不自动取消。前端倒计时只控制显示，服务器负责实际扣款判断；遇到ORDER_EXPIRED/ORDER_NOT_PAYABLE刷新订单状态并禁用付款。
+
+技术：MySQL行锁、条件UPDATE、Spring事务、固定UTC截止时间。源码：[实现][order-service] / [SQL][order-xml]。
+
+### 订单超时定时关闭
+
+OrderServiceImpl.closeExpiredOrders使用@Scheduled，默认UTC每分钟扫描一次；直接调用OrderMapper.closeExpiredOrders，单条UPDATE把status=PENDING且expires_at<=当前UTC时间的记录标记为CANCELED/TIMEOUT。不再申请用户行锁，不触碰余额或权益，已PAID的订单不会被覆盖。索引为(status,expires_at,id)，重复扫描只更新仍待付款的记录。
+
+wallpaper.order.payment-timeout-minutes默认15，通过ORDER_PAYMENT_TIMEOUT_MINUTES配置；新订单保存固定expiresAt，修改配置不会改变已有订单截止时间。wallpaper.order.expiration-cron默认每分钟，可用ORDER_EXPIRATION_CRON配置，测试环境设为“-”并显式推进Clock。GET /me/orders仍是普通只读查询，可能在扫描前返回状态为PENDING的已到期记录，前端会按expiresAt展示“已超时”；付款与重新下单都有实时检查，正确性不依赖定时任务准时执行。
 
 ## 九、已购与下载
 
@@ -760,6 +826,7 @@ HealthController.health
 
 | 场景 | 第一次检查 / 读取 | 第二次检查 / 约束 | 保护什么 |
 | --- | --- | --- | --- |
+| 登录/修改密码 | 密码校验或过滤器认证 | 锁定同一用户行后复查哈希/状态 | 防止旧密码并发登录绕过会话撤销 |
 | 注册/分类名称 | Service 普通查重 | 数据库唯一约束 | 两个请求都查到“没有”后不能同时插入同名 |
 | refresh/logout | 刷新按哈希普通读当前会话 | 登出单条条件 UPDATE，刷新不写数据 | 不新增或恢复会话，退出后所有关联 JWT 被认证拒绝 |
 | 商品创建分类 | 上传前普通查询 | 上传后事务内锁定读分类 | 上传期间分类被停用/删除 |
@@ -773,12 +840,12 @@ HealthController.health
 
 ### 12.3 当前没有实现的接口
 
-- 取消订单：只有 Qt `StoreService.cancelOrder` 和窗口按钮预留，不发送 HTTP，不改订单。
-- 充值、修改用户名、修改密码：只有前端接入位置，没有可用后端路由。
+- 取消订单已实现POST /orders/{id}/cancel，主动取消与超时关闭见第27节。
+- 充值、修改用户名：只有前端接入位置，没有可用后端路由。修改密码已实现PUT /me/password。
 - 退款：权益 Mapper 有按来源订单删除的方法，但没有退款 Controller/Service 完整流程；不能据此说退款业务已实现。
 - 外部支付、支付回调、购物车、多商品订单：未实现。现有付款是站内壁纸币。
 - 商品 DELETE：当前管理员商品四个业务接口是列表、创建、修改、上下架，没有商品物理删除 HTTP 接口。
-- 独立上传、test-pay：已经移除，不属于本次 25 个接口；FileUploadService 是内部能力。
+- 独立上传、test-pay：已经移除，不属于当前27个接口；FileUploadService 是内部能力。
 - Redis 分布式锁、全局回源限流、客户端封面磁盘缓存：尚未实现。后端 Redis 封面字节缓存及同JVM并发未命中合并已实现。
 
 ### 12.4 文档核对范围

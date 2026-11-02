@@ -29,6 +29,13 @@ public interface UserMapper {
      * @return 匹配条件的数据库记录或状态，没有记录时为null
      */
     User selectById(@Param("id") long id);
+
+    /** 锁定用户行；改密与登录创建会话使用同一行锁，防止旧密码并发登录。 */
+    User selectByIdForUpdate(@Param("id") long id);
+
+    /** 只更新已锁定用户的密码和更新时间，不修改余额、角色及其他业务数据。 */
+    int updatePassword(@Param("id") long id, @Param("passwordHash") String passwordHash,
+                       @Param("updatedAt") LocalDateTime updatedAt);
     /**
      * 仅查询账号当前壁纸币余额，避免订单确认读取密码哈希等无关资料。
      * 调用位置：OrderServiceImpl.createOrder、payOrder、getMyOrders。

@@ -21,6 +21,8 @@ public class Order {
     private String status;
     private String paymentMethod;
     private LocalDateTime createdAt;
+    private LocalDateTime expiresAt;
+    private String cancelReason;
     private LocalDateTime paidAt;
     private LocalDateTime canceledAt;
     private LocalDateTime refundedAt;

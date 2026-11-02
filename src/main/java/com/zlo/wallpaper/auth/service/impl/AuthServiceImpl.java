@@ -104,6 +104,14 @@ public class AuthServiceImpl implements AuthService {
         if (user == null || !matches || !"ACTIVE".equals(user.getStatus())) {
             throw new BusinessException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS", "账号或密码错误，或账号不可用");
         }
+        // 并发复查：密码校验在加锁前完成，期间可能发生改密或账号禁用。
+        // 与改密使用同一用户行锁：先登录的会话会被改密撤销，后登录必须使用新密码。
+        User currentUser = userMapper.selectByIdForUpdate(user.getId());
+        if (currentUser == null || !"ACTIVE".equals(currentUser.getStatus())
+                || !currentUser.getPasswordHash().equals(hash)) {
+            throw new BusinessException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS", "账号或密码错误，或账号不可用");
+        }
+        user = currentUser;
         String refreshToken = tokenGenerator.generateRefreshToken();
         LocalDateTime createdAt = now();
         Session session = createSession(user.getId(), refreshToken,

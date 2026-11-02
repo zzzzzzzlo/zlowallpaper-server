@@ -15,6 +15,7 @@ SOURCE database/006-simplify-order-entitlements.sql;
 SOURCE database/007-user-coin-balance.sql;
 SOURCE database/008-remove-user-display-name.sql;
 SOURCE database/009-simplify-sessions.sql;
+SOURCE database/010-order-expiration.sql;
 ```
 
 编号保留真实变更顺序，没有005不表示遗漏必须执行的脚本。早期文件包含过渡结构，后续脚本迁移到当前模型，不能只执行001。
@@ -34,3 +35,7 @@ SOURCE database/009-simplify-sessions.sql;
 dev-set-coin-balance.sql 仅用于手动设置开发余额，不是充值接口，也不会启动时自动赠币。余额使用整数最小单位，100单位=1币。
 
 见 [数据模型](../docs/data-model.md) 和 [接口调用链](../docs/api-call-chains.md)。
+
+## 订单有效期迁移
+
+先备份orders并停止旧后端，再执行010并启动新版。迁移增加expires_at、cancel_reason和(status,expires_at,id)索引，保留所有原订单。旧PENDING按创建时间+15分钟补齐；已经到期的改为CANCELED/TIMEOUT，余额、PAID订单及权益不改动。历史已取消订单不虚构原因。新订单默认15分钟，可配置ORDER_PAYMENT_TIMEOUT_MINUTES；修改配置只影响新单。

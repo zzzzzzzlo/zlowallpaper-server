@@ -1,6 +1,9 @@
 package com.zlo.wallpaper.auth;
 
 import com.zlo.wallpaper.auth.dto.LoginDTO;
+import com.zlo.wallpaper.auth.dto.ChangePasswordDTO;
+import com.zlo.wallpaper.auth.service.UserService;
+import com.zlo.wallpaper.common.BaseContext;
 import com.zlo.wallpaper.auth.dto.RegisterDTO;
 import com.zlo.wallpaper.auth.mapper.UserMapper;
 import com.zlo.wallpaper.auth.service.AuthService;
@@ -34,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class AuthMySqlIT {
     @Autowired private AuthService authService;
     @Autowired private UserMapper userMapper;
+    @Autowired private UserService userService;
     @Autowired private JdbcTemplate jdbc;
     private String username;
     private Long userId;
@@ -143,6 +147,59 @@ class AuthMySqlIT {
             assertThrows(BusinessException.class, () -> authService.authenticate(first.getAccessToken()));
             assertThrows(BusinessException.class, () -> authService.refresh(first.getRefreshToken()));
         } finally { executor.shutdownNow(); }
+    }
+
+    @Test
+    void passwordChangeRacingOldPasswordLoginLeavesNoUsableOldSession() throws Exception {
+        SessionVO original = login();
+        ChangePasswordDTO dto = new ChangePasswordDTO(); dto.setCurrentPassword("TestOnly123!"); dto.setNewPassword("ChangedOnly123!");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<SessionVO> oldLogin = executor.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                try { return login(); }
+                catch (BusinessException exception) { assertEquals("INVALID_CREDENTIALS", exception.getCode()); return null; }
+            });
+            Future<?> changed = executor.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                BaseContext.setCurrentId(userId);
+                try { userService.changePassword(dto); } finally { BaseContext.removeCurrentId(); }
+                return null;
+            });
+            start.countDown();
+            SessionVO racingLogin = oldLogin.get(15, TimeUnit.SECONDS);
+            changed.get(15, TimeUnit.SECONDS);
+            assertThrows(BusinessException.class, () -> authService.authenticate(original.getAccessToken()));
+            if (racingLogin != null) { assertThrows(BusinessException.class, () -> authService.authenticate(racingLogin.getAccessToken())); }
+            assertEquals(0, count("SELECT COUNT(*) FROM sessions WHERE user_id=? AND revoked_at IS NULL"));
+            assertThrows(BusinessException.class, () -> login());
+            LoginDTO next = new LoginDTO(); next.setUsername(username); next.setPassword("ChangedOnly123!");
+            assertEquals(userId, authService.authenticate(authService.login(next).getAccessToken()).getId());
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test
+    void simultaneousPasswordChangesAcceptOnlyOneCurrentPassword() throws Exception {
+        login();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<Boolean> first = executor.submit(() -> changeTogether(start, "FirstChanged123!"));
+            Future<Boolean> second = executor.submit(() -> changeTogether(start, "SecondChanged123!"));
+            start.countDown();
+            assertNotEquals(first.get(15, TimeUnit.SECONDS), second.get(15, TimeUnit.SECONDS));
+            assertEquals(0, count("SELECT COUNT(*) FROM sessions WHERE user_id=? AND revoked_at IS NULL"));
+        } finally { executor.shutdownNow(); }
+    }
+
+    private boolean changeTogether(CountDownLatch start, String password) throws Exception {
+        start.await(5, TimeUnit.SECONDS);
+        ChangePasswordDTO dto = new ChangePasswordDTO(); dto.setCurrentPassword("TestOnly123!"); dto.setNewPassword(password);
+        BaseContext.setCurrentId(userId);
+        try { userService.changePassword(dto); return true; }
+        catch (BusinessException exception) { assertEquals("CURRENT_PASSWORD_INCORRECT", exception.getCode()); return false; }
+        finally { BaseContext.removeCurrentId(); }
     }
 
     /**

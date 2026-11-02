@@ -14,10 +14,13 @@ import com.zlo.wallpaper.order.model.OrderProductRow;
 import com.zlo.wallpaper.order.service.OrderService;
 import com.zlo.wallpaper.order.vo.OrderVO;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
+import java.time.Clock;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -35,6 +38,8 @@ public class OrderServiceImpl implements OrderService {
     @Autowired private OrderMapper orderMapper;
     @Autowired private EntitlementMapper entitlementMapper;
     @Autowired private UserMapper userMapper;
+    @Autowired private Clock clock;
+    @Value("${wallpaper.order.payment-timeout-minutes:15}") private int paymentTimeoutMinutes;
 
     /**
      * 按登录身份查询全部状态订单，并直接转换订单快照，不关联商品或权益表。
@@ -99,10 +104,17 @@ public class OrderServiceImpl implements OrderService {
         if (activeOrder != null) {
             // 查到PAID却没有权益，说明记录不一致，不能再创建一笔收费订单。
             if (!"PENDING".equals(activeOrder.getStatus())) { throw purchaseConflict(); }
-            return result(activeOrder, false, balanceCents);
+            if (activeOrder.getExpiresAt() == null) { throw purchaseConflict(); }
+            LocalDateTime checkedAt = now();
+            if (activeOrder.getExpiresAt().isAfter(checkedAt)) {
+                // 重复下单复用原有效期，不因为重新打开付款窗口而续期。
+                return result(activeOrder, false, balanceCents);
+            }
+            // 并发复查：已持有用户与订单锁，按最新到期时间关闭旧单后才能新建。
+            closePendingOrder(activeOrder, "TIMEOUT", checkedAt);
         }
         if (!"PUBLISHED".equals(product.getPublicationStatus())) { throw productMissing(); }
-        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
+        LocalDateTime now = now();
         Order order = new Order();
         order.setUserId(userId);
         order.setWallpaperId(wallpaperId);
@@ -112,6 +124,10 @@ public class OrderServiceImpl implements OrderService {
         order.setStatus(product.getPriceCents() == 0 ? "PAID" : "PENDING");
         order.setCreatedAt(now);
         order.setUpdatedAt(now);
+        if (product.getPriceCents() > 0) {
+            if (paymentTimeoutMinutes < 1) { throw new IllegalStateException("订单付款有效期必须至少1分钟"); }
+            order.setExpiresAt(now.plusMinutes(paymentTimeoutMinutes));
+        }
         if (product.getPriceCents() == 0) {
             order.setPaymentMethod("FREE");
             order.setPaidAt(now);
@@ -149,8 +165,21 @@ public class OrderServiceImpl implements OrderService {
         }
 
         // 3. 取消/退款订单不能重新付款；退款后再购买应创建新订单。
+        if ("CANCELED".equals(order.getStatus()) && "TIMEOUT".equals(order.getCancelReason())) {
+            return toOrderVO(order, userMapper.selectBalanceById(userId));
+        }
         if (!"PENDING".equals(order.getStatus()) && !"PAID".equals(order.getStatus())) {
             throw new BusinessException(HttpStatus.CONFLICT, "ORDER_NOT_PAYABLE", "已取消或已退款的订单不能付款");
+        }
+        // 并发复查：请求发起时未到期，不代表等待行锁后仍可付款；以拿到锁后的服务器时间为准。
+        if ("PENDING".equals(order.getStatus())) {
+            if (order.getExpiresAt() == null) { throw purchaseConflict(); }
+            LocalDateTime checkedAt = now();
+            if (!order.getExpiresAt().isAfter(checkedAt)) {
+                closePendingOrder(order, "TIMEOUT", checkedAt);
+                // 正常返回让关闭操作提交；Controller在事务结束后转换为409 ORDER_EXPIRED。
+                return toOrderVO(order, userMapper.selectBalanceById(userId));
+            }
         }
         Entitlement entitlement = entitlementMapper.selectForUpdate(userId, order.getWallpaperId());
         if ("PAID".equals(order.getStatus())) {
@@ -164,7 +193,12 @@ public class OrderServiceImpl implements OrderService {
         if (entitlement != null) { throw purchaseConflict(); }
 
         // 4. 使用订单原金额、标题、币种，不受商品后续调价或下架影响。
-        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
+        LocalDateTime now = now();
+        // 并发复查：权益查询也可能等待锁，在实际扣款前再次确认截止时间；SQL仍带有效期条件。
+        if (!order.getExpiresAt().isAfter(now)) {
+            closePendingOrder(order, "TIMEOUT", now);
+            return toOrderVO(order, userMapper.selectBalanceById(userId));
+        }
         // 【并发控制：扣余额】用户行锁覆盖整笔付款；SQL余额条件保证不同订单也不能透支。
         // 同一订单重复付款已在上面返回，不会走到这里，因此不会重复扣币。
         if (userMapper.deductBalance(userId, order.getAmountCents(), now) != 1) {
@@ -179,6 +213,49 @@ public class OrderServiceImpl implements OrderService {
 
         // 5. 任意写入失败，异常向外抛出，Spring一起回滚余额、订单和权益；Controller在提交后返回。
         return toOrderVO(order, userMapper.selectBalanceById(userId));
+    }
+
+    @Override
+    @Transactional
+    public OrderVO cancelOrder(String id) {
+        Long userId = BaseContext.getCurrentId();
+        if (userId == null) { throw loginRequired(); }
+        CatalogIds.validatePathId(id);
+        Long orderId = CatalogIds.findDatabaseId(id);
+        if (orderId == null) { throw new BusinessException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "订单不存在"); }
+        // 与下单、付款统一先锁用户，再锁订单。并发复查账号状态和订单最新状态。
+        if (!"ACTIVE".equals(orderMapper.selectBuyerStatusForUpdate(userId))) { throw loginRequired(); }
+        Order order = orderMapper.selectOwnedOrderForUpdate(userId, orderId);
+        if (order == null) { throw new BusinessException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "订单不存在"); }
+        Long balanceCents = userMapper.selectBalanceById(userId);
+        if ("CANCELED".equals(order.getStatus())) { return toOrderVO(order, balanceCents); }
+        if (!"PENDING".equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_NOT_CANCELABLE", "已付款或已退款的订单不能取消");
+        }
+        if (order.getExpiresAt() == null) { throw purchaseConflict(); }
+        LocalDateTime closedAt = now();
+        closePendingOrder(order, order.getExpiresAt().isAfter(closedAt) ? "USER" : "TIMEOUT", closedAt);
+        return toOrderVO(order, balanceCents);
+    }
+
+    /** 单条原子UPDATE，不查询身份；只关闭PENDING到期订单，已付款订单不会被覆盖。 */
+    @Override
+    @Scheduled(cron = "${wallpaper.order.expiration-cron:0 * * * * *}", zone = "UTC")
+    public int closeExpiredOrders() {
+        return orderMapper.closeExpiredOrders(now());
+    }
+
+    /** 调用方已锁订单；统一填写关闭信息并检查条件UPDATE确实完成一次状态转换。 */
+    private void closePendingOrder(Order order, String reason, LocalDateTime closedAt) {
+        order.setStatus("CANCELED");
+        order.setCancelReason(reason);
+        order.setCanceledAt(closedAt);
+        order.setUpdatedAt(closedAt);
+        if (orderMapper.updateCanceledStatus(order) != 1) { throw purchaseConflict(); }
+    }
+
+    private LocalDateTime now() {
+        return LocalDateTime.ofInstant(clock.instant().truncatedTo(ChronoUnit.MILLIS), ZoneOffset.UTC);
     }
 
     /**
@@ -234,6 +311,9 @@ public class OrderServiceImpl implements OrderService {
         vo.setCurrency(order.getCurrency());
         vo.setStatus(order.getStatus());
         vo.setCreatedAt(order.getCreatedAt().atOffset(ZoneOffset.UTC));
+        vo.setExpiresAt(order.getExpiresAt() == null ? null : order.getExpiresAt().atOffset(ZoneOffset.UTC));
+        vo.setCancelReason(order.getCancelReason());
+        vo.setCanceledAt(order.getCanceledAt() == null ? null : order.getCanceledAt().atOffset(ZoneOffset.UTC));
         return vo;
     }
 

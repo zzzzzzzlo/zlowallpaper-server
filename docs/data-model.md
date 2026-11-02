@@ -15,7 +15,7 @@
 
 注册固定创建USER，管理员为ADMIN；状态为ACTIVE或DISABLED。每次认证核对当前账号状态与会话，不只验证JWT签名。数据库存密码哈希和刷新令牌哈希，不存明文密码或刷新令牌。
 
-余额用BIGINT/Long保存整数最小单位，100单位=1枚壁纸币，新用户为0。JSON中的余额为字符串，避免客户端整数精度问题。修改用户名/密码、充值还没有后端接口。
+余额用BIGINT/Long保存整数最小单位，100单位=1枚壁纸币，新用户为0。JSON中的余额为字符串，避免客户端整数精度问题。修改用户名、充值还没有后端接口。
 
 同一次登录的刷新只重新签发 accessToken，session ID、refreshToken、expires_at 保持不变。无 family_id、轮换历史或重放撤销。登出按令牌哈希原子更新 revoked_at，其他登录互不影响。旧库执行009迁移，保留全部会话ID、哈希、日期与撤销状态。
 
@@ -53,7 +53,7 @@
 | orders | id、user_id、wallpaper_id、title_snapshot、amount_cents、currency、status、payment_method | 下单快照、付款状态和支付方式 |
 | entitlements | id、user_id、wallpaper_id、source_order_id、granted_at | 当前有效购买权益和来源订单 |
 
-orders状态支持PENDING、PAID、CANCELED、REFUNDED；当前业务只实现创建与付款，没有取消/退款入口。支付方式为FREE或COIN，TEST仅兼容历史数据。新订单币种为ZLC，旧已完成订单可能保留CNY。
+orders状态支持PENDING、PAID、CANCELED、REFUNDED；当前实现创建、付款、主动取消与超时关闭，退款入口仍未开放。支付方式为FREE或COIN，TEST仅兼容历史数据。新订单币种为ZLC，旧已完成订单可能保留CNY。
 
 订单标题和价格是下单快照，不跟随商品改名或调价变化。商品ID仍关联当前商品；不得因为价格变更就覆盖历史成交金额。
 
@@ -69,3 +69,7 @@ orders状态支持PENDING、PAID、CANCELED、REFUNDED；当前业务只实现�
 - DATETIME(3)按UTC使用，接口输出带时区的ISO-8601时间。
 - SHA-256是文件内容指纹，不代表已实现全局文件去重或自动完整性回读校验。
 - 普通查询和FOR UPDATE用途不同；具体事务、锁及并发复查见 [调用链](api-call-chains.md)。
+
+修改密码已实现 `PUT /me/password`：提交currentPassword与newPassword，旧密码校验通过后更新PBKDF2哈希并撤销该账号所有现有会话；成功需重新登录。无需数据库迁移。
+
+订单新增expires_at（固定UTC付款截止时间）和cancel_reason（USER/TIMEOUT，历史未知为null），继续复用canceled_at。收费新单默认15分钟到期，免费单直接PAID且无截止时间；旧PENDING迁移按created_at+15分钟补齐并关闭到期记录。使用CANCELED表示主动取消和超时，保留全部历史记录。

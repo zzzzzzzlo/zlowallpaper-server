@@ -84,6 +84,30 @@ paths:
                     properties:
                       data: { $ref: '#/components/schemas/User' }
         default: { $ref: '#/components/responses/Error' }
+  /me/password:
+    put:
+      operationId: changePassword
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      summary: 校验当前密码后修改密码，撤销该账号所有已有登录
+      description: |
+        身份来自Bearer，不接受客户端指定要修改的用户ID。密码按Unicode字符计数，8–128个字符且不能全部为空白，不trim输入。
+        当前密码不正确返回400 CURRENT_PASSWORD_INCORRECT，新旧密码相同返回400 PASSWORD_UNCHANGED；这两种失败不清除有效登录。
+        密码哈希更新与所有现有会话撤销在同一事务提交。成功后调用端清除本地凭证，所有设备须使用新密码重新登录。
+        无登录/会话失效返回401 SESSION_EXPIRED，参数缺失或类型/长度不符返回400 VALIDATION_ERROR。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password, minLength: 8, maxLength: 128 }
+                newPassword: { type: string, format: password, minLength: 8, maxLength: 128 }
+      responses:
+        '200': { $ref: '#/components/responses/Empty' }
+        default: { $ref: '#/components/responses/Error' }
   /categories:
     get:
       operationId: categories
@@ -144,9 +168,9 @@ paths:
       security: [{ bearerAuth: [] }]
       summary: 创建订单；免费直接 PAID 并授权；返回已有有效订单避免重复购买
       description: |
-        已实现，无需请求键。已有权益时返回来源PAID订单；否则复用同账号同商品的PENDING订单，返回200。
+        已实现，无需请求键。已有权益时返回来源PAID订单；否则复用同账号同商品的未到期PENDING订单，返回200且不延长原截止时间；旧待付单已到期则先关闭，再按当前价格创建新单。
         确需新订单时检查商品已上架，并取服务端价格、标题和币种快照，返回201。
-        免费订单和权益在同一事务提交；收费订单先PENDING。行锁和唯一约束防止并发重复购买。
+        免费订单和权益在同一事务提交，expiresAt为null；收费订单先PENDING，默认创建后15分钟到期。行锁和唯一约束防止并发重复购买。
         取消/退款后没有有效权益与待付款订单时可以新购买；不提供旧请求键的历史结果重放。
         正常付款使用POST /orders/{id}/pay，实际扣减站内壁纸币；不再返回testPaymentEnabled。
       requestBody:
@@ -173,6 +197,7 @@ paths:
         已实现。无需请求体或查询参数，身份来自Bearer，不接受前端指定用户ID。
         返回本账号PENDING、PAID、CANCELED、REFUNDED全部状态订单；按createdAt倒序、相同时间按id倒序。
         title、amountCents、currency使用下单快照，不受商品改名、调价、下架影响；历史CNY订单保持原币种。
+        expiresAt是服务器固定付款截止时间；cancelReason为USER/TIMEOUT或历史未知null，canceledAt为关闭时间。定时任务最多有一个扫描周期延迟，前端按expiresAt显示到期，付款和重新下单仍实时复查。
         没有订单时data为空数组。最多1000条；超过返回409 ORDER_LIST_LIMIT_EXCEEDED，data为null，不静默截断。
       responses:
         '200':
@@ -188,6 +213,20 @@ paths:
                         type: array
                         items: { $ref: '#/components/schemas/Order' }
         default: { $ref: '#/components/responses/Error' }
+  /orders/{id}/cancel:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: cancelOrder
+      tags: [Orders]
+      security: [{ bearerAuth: [] }]
+      summary: 取消自己的待付款订单；重复取消返回原关闭结果
+      description: |
+        无请求体。只允许当前用户取消自己的PENDING订单；不存在和他人订单统一404 ORDER_NOT_FOUND。
+        未到期关闭为CANCELED/USER，已到期关闭为CANCELED/TIMEOUT。重复取消返回200，保留首次关闭时间和原因。
+        已付款或已退款返回409 ORDER_NOT_CANCELABLE。取消不扣币、不新增或删除权益、不删除订单。
+      responses:
+        '200': { $ref: '#/components/responses/Order' }
+        default: { $ref: '#/components/responses/Error' }
   /orders/{id}/pay:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     post:
@@ -200,7 +239,7 @@ paths:
         先锁用户再锁本用户订单。PENDING且无权益时按订单amountCents扣余额，更新PAID/COIN并新增权益。
         余额不足返回409 INSUFFICIENT_BALANCE，余额、订单及权益均不改变；任何写入异常一并回滚。
         PAID且有该订单授予的权益时返回原订单，不再次扣币，不改付款时间和方式。
-        取消/退款返回409 ORDER_NOT_PAYABLE；订单与权益不一致返回409 PURCHASE_STATE_CONFLICT。
+        超时返回409 ORDER_EXPIRED，关闭状态先提交，不扣币、不授予权益；其他取消/退款返回409 ORDER_NOT_PAYABLE；订单与权益不一致返回409 PURCHASE_STATE_CONFLICT。
         他人或不存在订单返回404 ORDER_NOT_FOUND。按下单快照成交，后续调价/下架不影响已有待付款订单。
         余额通过GET /me的balanceCents读取，100最小整数单位=1壁纸币，当前商品币种ZLC。
       responses:
@@ -693,7 +732,7 @@ components:
         total: { type: integer, minimum: 0 }
     Order:
       type: object
-      required: [id, userId, balanceCents, wallpaperId, title, amountCents, currency, status, createdAt]
+      required: [id, userId, balanceCents, wallpaperId, title, amountCents, currency, status, createdAt, expiresAt, cancelReason, canceledAt]
       properties:
         id: { type: string, pattern: '^[A-Za-z0-9._-]+$' }
         userId: { type: string, description: 当前登录用户ID，不接受前端指定归属 }
@@ -704,6 +743,9 @@ components:
         currency: { type: string, enum: [ZLC, CNY], description: 新订单ZLC；迁移前历史已付款等订单可能保留CNY }
         status: { type: string, enum: [PENDING, PAID, CANCELED, REFUNDED] }
         createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true, description: 固定付款截止时间；免费单及历史已结束订单可为null }
+        cancelReason: { type: string, nullable: true, enum: [USER, TIMEOUT, null] }
+        canceledAt: { type: string, format: date-time, nullable: true }
     DownloadGrant:
       type: object
       required: [wallpaperId, url, expiresAt, fileExtension, sizeBytes, sha256]

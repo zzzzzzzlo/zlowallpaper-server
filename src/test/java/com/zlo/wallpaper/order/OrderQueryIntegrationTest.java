@@ -111,7 +111,7 @@ class OrderQueryIntegrationTest {
         assertEquals("REFUNDED", rows.get(3).path("status").asText());
         assertEquals("CNY", rows.get(3).path("currency").asText());
         for (JsonNode row : rows) {
-            assertEquals(9, row.size());
+            assertEquals(12, row.size());
             assertTrue(row.path("id").isTextual());
             assertTrue(row.path("wallpaperId").isTextual());
             assertEquals("PAID".equals(row.path("status").asText()) ? "302" : "301",

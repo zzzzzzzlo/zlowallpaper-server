@@ -114,7 +114,7 @@ class OrderIntegrationTest {
     void freeOrderCreatesPaidSnapshotAndEntitlementInOneRequest() throws Exception {
         MvcResult response = create("{\"wallpaperId\":\"100\"}", "free-1", token, 201);
         JsonNode order = data(response);
-        assertEquals(9, order.size());
+        assertEquals(12, order.size());
         assertEquals(jdbc.queryForObject("SELECT user_id FROM orders WHERE id=?", Long.class, order.path("id").asLong()).toString(), order.path("userId").asText());
         assertEquals("0", order.path("balanceCents").asText());
         assertTrue(order.path("id").isTextual());

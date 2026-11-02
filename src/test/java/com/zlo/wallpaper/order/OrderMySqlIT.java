@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * 创建位置：由JUnit/Spring Test测试框架创建；仅用于src/test，不注册为生产业务组件。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
-        "wallpaper.auth.cleanup-cron=-", "wallpaper.storage.root=E:/zlowallpaper_sever/.local-setup/order-mysql-storage"})
+        "wallpaper.auth.cleanup-cron=-", "wallpaper.order.expiration-cron=-", "wallpaper.storage.root=E:/zlowallpaper_sever/.local-setup/order-mysql-storage"})
 @ActiveProfiles("local")
 @EnabledIfSystemProperty(named = "wallpaper.mysql.tests", matches = "true")
 class OrderMySqlIT {
@@ -493,6 +493,53 @@ class OrderMySqlIT {
             assertEquals(1, newlyCreated); assertEquals(1, count("orders")); assertEquals(paidProduct ? 0 : 1, count("entitlements"));
             
         } finally { start.countDown(); pool.shutdownNow(); assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS)); }
+    }
+
+    @Test
+    void cancellationAndExpiredPaymentNeverDeductOnMySql() {
+        jdbc.update("UPDATE wallpapers SET price_cents=1200 WHERE id=?", wallpaperId);
+        OrderVO pending = create().getOrder();
+        BaseContext.setCurrentId(buyerId);
+        try {
+            OrderVO canceled = service.cancelOrder(pending.getId());
+            assertEquals("USER", canceled.getCancelReason());
+            assertEquals(canceled.getCanceledAt(), service.cancelOrder(pending.getId()).getCanceledAt());
+            OrderVO next = create().getOrder();
+            BaseContext.setCurrentId(buyerId);
+            assertNotEquals(pending.getId(), next.getId());
+            jdbc.update("UPDATE orders SET created_at=UTC_TIMESTAMP(3)-INTERVAL 20 MINUTE,expires_at=UTC_TIMESTAMP(3)-INTERVAL 5 MINUTE WHERE id=? AND user_id=?", Long.valueOf(next.getId()), buyerId);
+            assertEquals("TIMEOUT", service.payOrder(next.getId()).getCancelReason());
+            assertEquals("CANCELED", jdbc.queryForObject("SELECT status FROM orders WHERE id=?", String.class, Long.valueOf(next.getId())));
+            assertEquals(10000L, jdbc.queryForObject("SELECT balance_cents FROM users WHERE id=?", Long.class, buyerId));
+            assertEquals(0, count("entitlements"));
+        } finally { BaseContext.removeCurrentId(); }
+    }
+
+    @Test
+    void cancelRacingPaymentHasOneResultOnMySql() throws Exception {
+        jdbc.update("UPDATE wallpapers SET price_cents=1200 WHERE id=?", wallpaperId);
+        String id = create().getOrder().getId();
+        ExecutorService pool = Executors.newFixedThreadPool(2); CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<String> paid = pool.submit(() -> lifecycleRace(start, id, true));
+            Future<String> canceled = pool.submit(() -> lifecycleRace(start, id, false));
+            start.countDown(); String payResult=paid.get(20,TimeUnit.SECONDS),cancelResult=canceled.get(20,TimeUnit.SECONDS);
+            String status=jdbc.queryForObject("SELECT status FROM orders WHERE id=?",String.class,Long.valueOf(id));
+            if("PAID".equals(status)) {
+                assertEquals("PAID",payResult);assertEquals("ORDER_NOT_CANCELABLE",cancelResult);assertEquals(1,count("entitlements"));
+                assertEquals(8800L,jdbc.queryForObject("SELECT balance_cents FROM users WHERE id=?",Long.class,buyerId));
+            } else {
+                assertEquals("CANCELED",status);assertEquals("ORDER_NOT_PAYABLE",payResult);assertEquals("CANCELED",cancelResult);assertEquals(0,count("entitlements"));
+                assertEquals(10000L,jdbc.queryForObject("SELECT balance_cents FROM users WHERE id=?",Long.class,buyerId));
+            }
+        } finally { pool.shutdownNow(); }
+    }
+
+    private String lifecycleRace(CountDownLatch start,String id,boolean pay) throws Exception {
+        start.await(5,TimeUnit.SECONDS);BaseContext.setCurrentId(buyerId);
+        try{return (pay?service.payOrder(id):service.cancelOrder(id)).getStatus();}
+        catch(BusinessException failure){return failure.getCode();}
+        finally{BaseContext.removeCurrentId();}
     }
 
     /**

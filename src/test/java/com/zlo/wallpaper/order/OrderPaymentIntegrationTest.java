@@ -106,7 +106,7 @@ class OrderPaymentIntegrationTest {
 
         MvcResult response = pay(id, token, 200);
         JsonNode paid = data(response);
-        assertEquals(9, paid.size());
+        assertEquals(12, paid.size());
         assertEquals(buyerId.toString(), paid.path("userId").asText());
         assertEquals("10000", pending.path("balanceCents").asText());
         assertEquals("9010", paid.path("balanceCents").asText());

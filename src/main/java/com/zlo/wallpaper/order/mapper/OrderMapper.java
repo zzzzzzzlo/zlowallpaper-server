@@ -5,6 +5,7 @@ import com.zlo.wallpaper.order.model.OrderProductRow;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import java.util.List;
+import java.time.LocalDateTime;
 
 /**
  * 声明本账号订单列表查询，以及下单、付款时的锁定读取与订单写入SQL。
@@ -73,4 +74,10 @@ public interface OrderMapper {
      * @return 更新行数，正常状态转换应为1
      */
     int updatePaidStatus(Order order);
+
+    /** 只允许从PENDING关闭，用户与订单ID双重限定；不删除订单或改动余额。 */
+    int updateCanceledStatus(Order order);
+
+    /** 定时任务单条条件UPDATE关闭到期订单；付款后状态已变为PAID的记录不受影响。 */
+    int closeExpiredOrders(@Param("now") LocalDateTime now);
 }

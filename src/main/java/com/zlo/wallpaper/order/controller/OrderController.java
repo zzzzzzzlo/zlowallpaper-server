@@ -62,7 +62,19 @@ public class OrderController {
      * @return HTTP 200的统一订单响应，重复付款也返回200
      */
     @PostMapping("/orders/{id}/pay")
-    public ApiResponse<OrderVO> payOrder(@PathVariable String id, HttpServletRequest request) {
-        return ApiResponse.success(orderService.payOrder(id), RequestIdFilter.current(request));
+    public ResponseEntity<ApiResponse<OrderVO>> payOrder(@PathVariable String id, HttpServletRequest request) {
+        OrderVO order = orderService.payOrder(id);
+        String requestId = RequestIdFilter.current(request);
+        if ("CANCELED".equals(order.getStatus()) && "TIMEOUT".equals(order.getCancelReason())) {
+            // Service事务已提交关闭结果，此处返回错误不会把关闭操作一起回滚。
+            ApiResponse<OrderVO> response = new ApiResponse<>("ORDER_EXPIRED", "订单已超时，请重新下单", null, requestId);
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+        }
+        return ResponseEntity.ok(ApiResponse.success(order, requestId));
+    }
+
+    @PostMapping("/orders/{id}/cancel")
+    public ApiResponse<OrderVO> cancelOrder(@PathVariable String id, HttpServletRequest request) {
+        return ApiResponse.success(orderService.cancelOrder(id), RequestIdFilter.current(request));
     }
 }

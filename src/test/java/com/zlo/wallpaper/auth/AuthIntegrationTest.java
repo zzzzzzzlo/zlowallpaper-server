@@ -3,6 +3,8 @@ package com.zlo.wallpaper.auth;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zlo.wallpaper.auth.dto.LoginDTO;
+import com.zlo.wallpaper.auth.dto.ChangePasswordDTO;
+import com.zlo.wallpaper.auth.service.UserService;
 import com.zlo.wallpaper.auth.service.AuthService;
 import com.zlo.wallpaper.auth.task.SessionCleanupTask;
 import com.zlo.wallpaper.auth.util.JwtUtil;
@@ -49,6 +51,7 @@ class AuthIntegrationTest {
     @Autowired private AuthService authService;
     @Autowired private JwtUtil jwtUtil;
     @Autowired private SessionCleanupTask cleanup;
+    @Autowired private UserService userService;
     private static final String PASSWORD = "Learning123!";
 
     /**
@@ -437,6 +440,94 @@ class AuthIntegrationTest {
         cleanup.cleanExpiredSessions();
         assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM sessions", Integer.class));
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM users", Integer.class));
+    }
+
+    @Test
+    void passwordChangeUpdatesOnlyCurrentUserAndRevokesAllTheirLogins() throws Exception {
+        JsonNode first = registerAndLogin("learner");
+        JsonNode second = login("learner");
+        JsonNode another = registerAndLogin("another");
+        String id = first.path("user").path("id").asText();
+        String originalHash = jdbc.queryForObject("SELECT password_hash FROM users WHERE id=?", String.class, id);
+        jdbc.update("UPDATE users SET balance_cents=12345 WHERE id=?", id);
+        Map<String, Object> payload = Map.of("currentPassword", PASSWORD, "newPassword", "Changed123!",
+                "userId", another.path("user").path("id").asText());
+        MvcResult result = changePassword(first, payload, 200);
+        assertEquals(0, body(result).path("data").size());
+        String stored = jdbc.queryForObject("SELECT password_hash FROM users WHERE id=?", String.class, id);
+        assertNotEquals(originalHash, stored);
+        assertNotEquals("Changed123!", stored);
+        assertEquals(12345L, jdbc.queryForObject("SELECT balance_cents FROM users WHERE id=?", Long.class, id));
+        assertEquals("learner", jdbc.queryForObject("SELECT username FROM users WHERE id=?", String.class, id));
+        for (JsonNode session : new JsonNode[]{first, second}) {
+            getWithToken("/me", session.path("accessToken").asText(), 401);
+            postJson("/auth/refresh", refresh(session), 401);
+        }
+        getWithToken("/me", another.path("accessToken").asText(), 200);
+        postJson("/auth/login", Map.of("username", "learner", "password", PASSWORD), 401);
+        postJson("/auth/login", Map.of("username", "learner", "password", "Changed123!"), 200);
+        // 改密只更新users和sessions，不依赖订单、权益或商品表。
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM sessions WHERE user_id=? AND revoked_at IS NOT NULL", Integer.class, id));
+    }
+
+    @Test
+    void wrongOrUnchangedPasswordKeepsExistingSessionAndHash() throws Exception {
+        JsonNode session = registerAndLogin("learner");
+        String hash = jdbc.queryForObject("SELECT password_hash FROM users", String.class);
+        assertCode(changePassword(session, Map.of("currentPassword", "Wrong123!", "newPassword", "Changed123!"), 400), "CURRENT_PASSWORD_INCORRECT");
+        assertCode(changePassword(session, Map.of("currentPassword", PASSWORD, "newPassword", PASSWORD), 400), "PASSWORD_UNCHANGED");
+        assertEquals(hash, jdbc.queryForObject("SELECT password_hash FROM users", String.class));
+        getWithToken("/me", session.path("accessToken").asText(), 200);
+        postJson("/auth/refresh", refresh(session), 200);
+    }
+
+    @Test
+    void passwordChangeRequiresAuthenticationAndStrictPasswordFields() throws Exception {
+        mvc.perform(put("/api/v1/me/password").contextPath("/api/v1")
+                .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isUnauthorized());
+        JsonNode session = registerAndLogin("learner");
+        Object[] invalid = {"", "short", "        ", "a".repeat(129), 12345678, true, java.util.List.of("password")};
+        for (Object value : invalid) {
+            assertCode(changePassword(session, Map.of("currentPassword", PASSWORD, "newPassword", value), 400), "VALIDATION_ERROR");
+            assertCode(changePassword(session, Map.of("currentPassword", value, "newPassword", "Changed123!"), 400), "VALIDATION_ERROR");
+        }
+        assertCode(changePassword(session, Map.of("currentPassword", PASSWORD), 400), "VALIDATION_ERROR");
+        assertCode(changePassword(session, Map.of("newPassword", "Changed123!"), 400), "VALIDATION_ERROR");
+        getWithToken("/me", session.path("accessToken").asText(), 200);
+    }
+
+    @Test
+    void changedPasswordKeepsUnicodeLengthAndWhitespace() throws Exception {
+        JsonNode session = registerAndLogin("learner");
+        String nextPassword = " " + "🔑".repeat(126) + " ";
+        changePassword(session, Map.of("currentPassword", PASSWORD, "newPassword", nextPassword), 200);
+        postJson("/auth/login", Map.of("username", "learner", "password", nextPassword), 200);
+        postJson("/auth/login", Map.of("username", "learner", "password", nextPassword.strip()), 401);
+    }
+
+    @Test
+    void failedRevocationRollsBackPasswordUpdate() throws Exception {
+        JsonNode session = registerAndLogin("learner");
+        String hash = jdbc.queryForObject("SELECT password_hash FROM users", String.class);
+        jdbc.execute("ALTER TABLE sessions ADD CONSTRAINT ck_test_no_revocation CHECK (revoked_at IS NULL)");
+        ChangePasswordDTO dto = new ChangePasswordDTO(); dto.setCurrentPassword(PASSWORD); dto.setNewPassword("Changed123!");
+        BaseContext.setCurrentId(Long.valueOf(session.path("user").path("id").asText()));
+        try {
+            assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () -> userService.changePassword(dto));
+        } finally {
+            BaseContext.removeCurrentId();
+            jdbc.execute("ALTER TABLE sessions DROP CONSTRAINT ck_test_no_revocation");
+        }
+        assertEquals(hash, jdbc.queryForObject("SELECT password_hash FROM users", String.class));
+        getWithToken("/me", session.path("accessToken").asText(), 200);
+    }
+
+    private MvcResult changePassword(JsonNode session, Map<String, ?> payload, int expected) throws Exception {
+        return mvc.perform(put("/api/v1/me/password").contextPath("/api/v1")
+                .header("Authorization", "Bearer " + session.path("accessToken").asText())
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(payload)))
+                .andExpect(status().is(expected)).andReturn();
     }
 
     /**

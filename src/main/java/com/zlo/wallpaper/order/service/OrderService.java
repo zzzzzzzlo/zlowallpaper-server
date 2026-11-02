@@ -32,7 +32,13 @@ public interface OrderService {
      * 完成本账号订单的壁纸币付款，重复付款返回原结果，实际扣减站内壁纸币，不涉及外部支付渠道。
      * 调用位置：OrderController.payOrder，由OrderServiceImpl实现。
      * @param id 前端传入的订单字符串ID
-     * @return 已付款订单的现有OrderVO；无法付款时抛出业务异常
+     * @return 已付款订单，或已提交超时关闭的订单（Controller转为409）；其他失败抛业务异常
      */
     OrderVO payOrder(String id);
+
+    /** 取消自己的待付款订单；重复取消返回原结果，已付款或退款订单不可取消。 */
+    OrderVO cancelOrder(String id);
+
+    /** 定时关闭到期的待付款订单，返回本次关闭数量。 */
+    int closeExpiredOrders();
 }

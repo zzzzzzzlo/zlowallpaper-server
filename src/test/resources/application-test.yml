@@ -1,5 +1,7 @@
 # 自动测试使用独立内存数据库，不读取真实密码、不连接商城库。
 wallpaper:
+  order:
+    expiration-cron: "-" # 由订单测试显式推进时间并调用，避免后台任务干扰断言
   cover-cache:
     enabled: false # 普通回归不依赖本机Redis；缓存行为另用专项测试验证
   auth:

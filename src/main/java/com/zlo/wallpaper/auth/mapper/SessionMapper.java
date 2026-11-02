@@ -16,6 +16,8 @@ public interface SessionMapper {
     int insert(Session session);
     /** 仅撤销尚未撤销的当前会话，重复调用不覆盖原撤销时间。 */
     int revokeByRefreshHash(@Param("hash") String hash, @Param("now") LocalDateTime now);
+    /** 改密成功后撤销该账号所有未撤销会话；与密码更新在同一事务提交。 */
+    int revokeByUserId(@Param("userId") long userId, @Param("now") LocalDateTime now);
     /** 定时清理到期且已经超过保留期的会话。 */
     int deleteExpired(@Param("cutoff") LocalDateTime cutoff);
 }
